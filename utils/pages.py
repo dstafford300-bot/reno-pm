@@ -1,6 +1,14 @@
 import streamlit as st
 
-from views import budget, dashboard, journal, material_logs, schedule, upload_sow
+from views import (
+    budget,
+    dashboard,
+    entry_redirect,
+    journal,
+    material_logs,
+    schedule,
+    upload_sow,
+)
 
 DASHBOARD_PAGE = st.Page(
     dashboard.render, title="Dashboard", icon="🏠", url_path="dashboard", default=True
@@ -24,6 +32,13 @@ MATERIAL_LOGS_PAGE = st.Page(
     url_path="material-logs",
 )
 
+# Not in the icon rail — registered purely so Streamlit's router recognizes
+# /go and /demo as real paths instead of "correcting" them back to "/" and
+# silently dropping the token main.py just resolved for them. See
+# views/entry_redirect.py.
+GO_PAGE = st.Page(entry_redirect.render, title="Go", url_path="go")
+DEMO_PAGE = st.Page(entry_redirect.render, title="Demo", url_path="demo")
+
 PAGES = [
     DASHBOARD_PAGE,
     SCHEDULE_PAGE,
@@ -31,4 +46,6 @@ PAGES = [
     JOURNAL_PAGE,
     UPLOAD_SOW_PAGE,
     MATERIAL_LOGS_PAGE,
+    GO_PAGE,
+    DEMO_PAGE,
 ]

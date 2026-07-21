@@ -37,10 +37,15 @@ provided_token = st.query_params.get("token")
 # right away so everything below (including the icon rail's link-building,
 # which reads provided_token) behaves exactly as if ?token=... had been on
 # the URL from the start. /go is the "Add to Home Screen" link: iOS Safari
-# sometimes saves a page's canonical URL instead of the exact address-bar
-# URL when you add a home-screen icon, which can silently drop a
-# ?token=... query string — a bare path has nothing to lose. /demo is the
-# separate, revocable link for sharing with trusted people.
+# can save a page's canonical/settled URL instead of the exact
+# address-bar URL you tapped Share from, so a bare path with nothing to
+# lose is more reliable than hoping a query string survives. /demo is the
+# separate, revocable link for sharing with trusted people. Both are
+# registered real pages (utils/pages.py's GO_PAGE/DEMO_PAGE) purely so
+# Streamlit's router recognizes them and doesn't "correct" the URL back
+# to "/" before this resolved token ever makes it into query params —
+# that correction was the actual cause of tokens getting silently
+# dropped, not the canonical-URL theory alone.
 if not provided_token:
     try:
         from urllib.parse import urlparse
@@ -48,14 +53,6 @@ if not provided_token:
         current_path = urlparse(st.context.url).path.strip("/").lower()
     except Exception:
         current_path = ""
-    # Neither /go nor /demo is a registered page path, so Streamlit
-    # briefly flashes its own "Page not found" toast before falling back
-    # to the default (Dashboard) page — tried redirecting past it with
-    # st.switch_page, but calling it this early (before
-    # st.navigation().run() has established a navigation context for
-    # this run) sent the app into a repeating "not found" loop instead.
-    # The toast is a cosmetic wrinkle, not a broken link — left as-is
-    # rather than fighting Streamlit's router further.
     if current_path == "go":
         provided_token = ACCESS_TOKEN
     elif current_path == "demo":
@@ -66,6 +63,12 @@ if not provided_token:
             provided_token = get_demo_token(get_supabase_client())
         except Exception:
             provided_token = None
+    if provided_token:
+        # Writes the token into the actual browser URL (not just our own
+        # Python variable) before entry_redirect.render() switches to
+        # Dashboard, so the session's query params are correct from here
+        # on regardless of what page renders next.
+        st.query_params["token"] = provided_token
 
 # Constant-time comparison — a plain `!=` leaks how many leading
 # characters matched via response-time differences, which matters for a
