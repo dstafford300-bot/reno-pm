@@ -40,6 +40,24 @@ token_valid = bool(ACCESS_TOKEN) and bool(provided_token) and hmac.compare_diges
     provided_token, ACCESS_TOKEN
 )
 
+if not token_valid and provided_token:
+    # Fallback: a separate, independently revocable demo token for
+    # sharing with trusted people without touching ACCESS_TOKEN (which
+    # Jeeves' Telegram links and your own daily use depend on). Stored in
+    # Supabase rather than secrets so it can be revoked instantly by
+    # deleting one row. Only reached when the primary token didn't
+    # match, and only ever queries this one bot_state row — never
+    # property/business data — so an invalid token still can't reach
+    # anything sensitive.
+    try:
+        from db.connection import get_supabase_client
+        from services.demo_access import get_demo_token
+
+        demo_token = get_demo_token(get_supabase_client())
+    except Exception:
+        demo_token = None
+    token_valid = bool(demo_token) and hmac.compare_digest(provided_token, demo_token)
+
 if not token_valid:
     _access_denied()
 
