@@ -1,0 +1,32 @@
+name: Nightly Sync
+
+# Replaces the old macOS launchd job (scripts/com.renopm.journalsync.plist)
+# — runs in GitHub's cloud instead of depending on a Mac being on. Pulls
+# Telegram journal messages, checks Gmail for receipts, and sends the PM's
+# daily cross-property digest. See scripts/nightly_journal_sync.py.
+
+on:
+  schedule:
+    - cron: "0 10 * * *" # ~5-6am US Eastern (adjust to taste)
+  workflow_dispatch: {} # lets you trigger a run manually from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python scripts/nightly_journal_sync.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          BASE_URL: ${{ secrets.BASE_URL }}
