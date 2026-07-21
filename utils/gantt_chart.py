@@ -77,8 +77,24 @@ def build_gantt_figure(df, chronological_order: list[str]):
     # reversal flips that into bottom-up (verified by rendering both
     # variants to PNG in an earlier session).
     fig.update_yaxes(title=None, showgrid=False, zeroline=False)
+
+    # Hard pan/zoom boundary (not just an initial view) — without this,
+    # dragging the chart on mobile scrolls the date axis indefinitely in
+    # both directions with nothing but empty space past the real tasks.
+    # Anchored to the project's own start date, not "today", so the
+    # window stays put regardless of when someone happens to view it.
+    project_start = df["start_date"].min()
+    min_allowed = (project_start - pd.Timedelta(days=14)).to_pydatetime()
+    max_allowed = (project_start + pd.DateOffset(months=6)).to_pydatetime()
+
     fig.update_xaxes(
-        title=None, showgrid=True, gridcolor=GRIDLINE_COLOR, gridwidth=1, zeroline=False
+        title=None,
+        showgrid=True,
+        gridcolor=GRIDLINE_COLOR,
+        gridwidth=1,
+        zeroline=False,
+        minallowed=min_allowed,
+        maxallowed=max_allowed,
     )
 
     # Mirror the date axis onto a second, invisible-trace axis pinned to the
