@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.renopm.journalsync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/poohbear/Desktop/PM Software/venv/bin/python</string>
+        <string>/Users/poohbear/Desktop/PM Software/scripts/nightly_journal_sync.py</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/poohbear/Desktop/PM Software/logs/nightly_journal_sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/poohbear/Desktop/PM Software/logs/nightly_journal_sync.err.log</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/poohbear/Desktop/PM Software</string>
+</dict>
+</plist>

@@ -1,0 +1,17 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Environment / secrets
+.env
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+
+# Scheduled job logs
+logs/
+
+# Local Claude Code tooling config (not part of the app)
+.claude/
