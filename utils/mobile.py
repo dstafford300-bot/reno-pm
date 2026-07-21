@@ -84,14 +84,20 @@ def inject_mobile_card_css(key_prefixes: list[str]):
 
 
 def inject_mobile_gantt_fallback_css(chart_key: str, list_key: str):
-    """Swaps the Gantt chart for a vertical task list below the mobile
-    breakpoint — both are rendered, CSS picks which one is visible so no
-    server round-trip is needed to react to viewport size."""
+    """Swaps the Gantt chart for a vertical task list, but only below the
+    mobile breakpoint AND while held in portrait — both are rendered, CSS
+    picks which one is visible so no server round-trip is needed to react
+    to viewport size or rotation.
+
+    Gating on orientation (not just width) matters: a phone rotated to
+    landscape is frequently still narrower than a small tablet's portrait
+    width, so a plain width-only breakpoint left rotating the device do
+    nothing — landscape must win regardless of exact pixel width."""
     st.markdown(
         f"""
         <style>
         [class*="st-key-{list_key}"] {{ display: none; }}
-        @media (max-width: {MOBILE_BREAKPOINT_PX}px) {{
+        @media (max-width: {MOBILE_BREAKPOINT_PX}px) and (orientation: portrait) {{
             [class*="st-key-{chart_key}"] {{ display: none !important; }}
             [class*="st-key-{list_key}"] {{ display: block !important; }}
         }}

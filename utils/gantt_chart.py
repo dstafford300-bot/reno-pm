@@ -134,14 +134,26 @@ def build_gantt_figure(df, chronological_order: list[str]):
     return fig
 
 
-def render_responsive_gantt_chart(df, chronological_order: list[str], key_prefix: str):
-    """Renders the Gantt chart plus its mobile linear-list fallback (both
-    are in the DOM; CSS picks which is visible based on viewport width —
-    see utils/mobile.py). Shared by the Schedule page (which uses the
-    returned click event to drive its quick-edit overlay) and the
-    read-only client view (which just discards it).
+def render_responsive_gantt_chart(
+    df, chronological_order: list[str], key_prefix: str, show_chart: bool = True
+):
+    """Renders the Gantt chart plus its mobile linear-list fallback.
 
-    Returns the plotly_chart `event` object (or None if df is empty).
+    The chart/list split is decided by CSS using the device's actual
+    *orientation*, not just viewport width — a phone rotated to
+    landscape is still often narrower than a small tablet's portrait
+    width, so a plain width breakpoint left rotation doing nothing. Below
+    the breakpoint AND in portrait: list only. Landscape (regardless of
+    width) or above the breakpoint: chart only. See utils/mobile.py.
+
+    `show_chart=False` (the Schedule page's own checkbox) skips building
+    the chart entirely and forces the list on at every viewport/
+    orientation — unchecking it always means "just show me the list."
+
+    Shared by the Schedule page (which uses the returned click event to
+    drive its quick-edit overlay) and the read-only client view (which
+    just discards it). Returns the plotly_chart `event` object, or None
+    if df is empty or show_chart is False.
     """
     if df.empty:
         st.info("None of the tasks in this selection have valid dates yet.")
@@ -150,21 +162,32 @@ def render_responsive_gantt_chart(df, chronological_order: list[str], key_prefix
     key_prefix = sanitize_key(key_prefix)
     chart_key = f"{key_prefix}_gantt_wrapper"
     list_key = f"{key_prefix}_mobile_task_list"
-    inject_mobile_gantt_fallback_css(chart_key=chart_key, list_key=list_key)
 
-    with st.container(key=chart_key):
-        fig = build_gantt_figure(df, chronological_order)
-        event = st.plotly_chart(
-            fig,
-            use_container_width=True,
-            config={"displayModeBar": False},
-            on_select="rerun",
-            selection_mode="points",
-            key=f"{key_prefix}_gantt_chart",
+    event = None
+    if show_chart:
+        inject_mobile_gantt_fallback_css(chart_key=chart_key, list_key=list_key)
+        with st.container(key=chart_key):
+            fig = build_gantt_figure(df, chronological_order)
+            event = st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={"displayModeBar": False},
+                on_select="rerun",
+                selection_mode="points",
+                key=f"{key_prefix}_gantt_chart",
+            )
+    else:
+        # No chart in the DOM at all — force the list on unconditionally,
+        # overriding the default-hidden rule inject_mobile_gantt_fallback_css
+        # would otherwise apply (that CSS never even runs in this branch).
+        st.markdown(
+            f'<style>[class*="st-key-{list_key}"] {{ display: block !important; }}</style>',
+            unsafe_allow_html=True,
         )
 
     with st.container(key=list_key):
-        st.info("🔄 Rotate screen horizontally to view the full Gantt Chart.")
+        if show_chart:
+            st.info("🔄 Rotate to landscape to view the full Gantt Chart.")
         mobile_df = df.sort_values("start_date")
         phases: dict[str, list] = {}
         for _, mobile_row in mobile_df.iterrows():
@@ -172,32 +195,34 @@ def render_responsive_gantt_chart(df, chronological_order: list[str], key_prefix
             phases.setdefault(phase_name, []).append(mobile_row)
 
         for phase_name, phase_rows in phases.items():
-            st.markdown(f"#### {html.escape(phase_name)}")
-            for mobile_row in phase_rows:
-                percent = mobile_row.get("percent_complete") or 0
-                status = mobile_row["status_norm"]
-                color = status_color(status)
-                start_str = mobile_row["start_date"].strftime("%m-%d-%Y")
-                end_str = mobile_row["estimated_end_date"].strftime("%m-%d-%Y")
-                st.markdown(
-                    f"""
-                    <div style="border:1px solid rgba(0,0,0,0.12);border-radius:10px;
-                                padding:0.75rem 1rem;margin-bottom:0.6rem;">
-                        <div style="font-weight:600;margin-bottom:0.35rem;">
-                            {html.escape(mobile_row['label'])}
+            # Collapsed by default — headings only until tapped, so a
+            # long task list doesn't turn into a wall of open cards.
+            with st.expander(html.escape(phase_name), expanded=False):
+                for mobile_row in phase_rows:
+                    percent = mobile_row.get("percent_complete") or 0
+                    status = mobile_row["status_norm"]
+                    color = status_color(status)
+                    start_str = mobile_row["start_date"].strftime("%m-%d-%Y")
+                    end_str = mobile_row["estimated_end_date"].strftime("%m-%d-%Y")
+                    st.markdown(
+                        f"""
+                        <div style="border:1px solid rgba(0,0,0,0.12);border-radius:10px;
+                                    padding:0.75rem 1rem;margin-bottom:0.6rem;">
+                            <div style="font-weight:600;margin-bottom:0.35rem;">
+                                {html.escape(mobile_row['label'])}
+                            </div>
+                            <div style="display:flex;justify-content:space-between;
+                                        align-items:center;flex-wrap:wrap;gap:0.5rem;">
+                                <span style="background:{color};color:white;padding:2px 10px;
+                                            border-radius:999px;font-size:0.75rem;
+                                            font-weight:600;">{percent:.0f}% — {html.escape(status)}</span>
+                                <span style="font-size:0.8rem;opacity:0.7;">
+                                    {start_str} → {end_str}
+                                </span>
+                            </div>
                         </div>
-                        <div style="display:flex;justify-content:space-between;
-                                    align-items:center;flex-wrap:wrap;gap:0.5rem;">
-                            <span style="background:{color};color:white;padding:2px 10px;
-                                        border-radius:999px;font-size:0.75rem;
-                                        font-weight:600;">{percent:.0f}% — {html.escape(status)}</span>
-                            <span style="font-size:0.8rem;opacity:0.7;">
-                                {start_str} → {end_str}
-                            </span>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
     return event

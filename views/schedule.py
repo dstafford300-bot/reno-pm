@@ -193,129 +193,131 @@ def render():
                 width="stretch",
             )
 
-    if show_chart:
-        st.markdown(
-            """
-            <style>
-            .st-key-quick_edit_overlay {
-                position: fixed;
-                top: 90px;
-                right: 68px;
-                z-index: 50;
-                width: 260px;
-                background: #FFFFFF;
-                border: 1px solid rgba(0,0,0,0.12);
-                border-radius: 12px;
-                padding: 1rem;
-                box-shadow: 0 8px 24px rgba(0,0,0,0.18);
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        """
+        <style>
+        .st-key-quick_edit_overlay {
+            position: fixed;
+            top: 90px;
+            right: 68px;
+            z-index: 50;
+            width: 260px;
+            background: #FFFFFF;
+            border: 1px solid rgba(0,0,0,0.12);
+            border-radius: 12px;
+            padding: 1rem;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        event = render_responsive_gantt_chart(
-            df, chronological_order, key_prefix=f"sched_{property_id}_{selected_unit_name}"
-        )
-        selected_points = event.selection.points if event else []
-        if selected_points:
-            clicked_id = selected_points[0]["customdata"][0]
-            clicked_rows = df[df["id"] == clicked_id]
-            if not clicked_rows.empty:
-                row = clicked_rows.iloc[0]
-                original_duration_days = (
-                    row["estimated_end_date"] - row["start_date"]
-                ).days
+    event = render_responsive_gantt_chart(
+        df,
+        chronological_order,
+        key_prefix=f"sched_{property_id}_{selected_unit_name}",
+        show_chart=show_chart,
+    )
+    selected_points = event.selection.points if event else []
+    if selected_points:
+        clicked_id = selected_points[0]["customdata"][0]
+        clicked_rows = df[df["id"] == clicked_id]
+        if not clicked_rows.empty:
+            row = clicked_rows.iloc[0]
+            original_duration_days = (
+                row["estimated_end_date"] - row["start_date"]
+            ).days
 
-                start_key = f"quick_start_{clicked_id}"
-                end_key = f"quick_end_{clicked_id}"
-                prev_start_key = f"quick_start_prev_{clicked_id}"
+            start_key = f"quick_start_{clicked_id}"
+            end_key = f"quick_end_{clicked_id}"
+            prev_start_key = f"quick_start_prev_{clicked_id}"
 
-                if start_key not in st.session_state:
-                    st.session_state[start_key] = row["start_date"].date()
-                if end_key not in st.session_state:
-                    st.session_state[end_key] = row["estimated_end_date"].date()
-                if prev_start_key not in st.session_state:
-                    st.session_state[prev_start_key] = st.session_state[start_key]
+            if start_key not in st.session_state:
+                st.session_state[start_key] = row["start_date"].date()
+            if end_key not in st.session_state:
+                st.session_state[end_key] = row["estimated_end_date"].date()
+            if prev_start_key not in st.session_state:
+                st.session_state[prev_start_key] = st.session_state[start_key]
 
-                with st.container(key="quick_edit_overlay"):
-                    st.markdown("**Quick edit**")
-                    st.caption(row["label"])
-                    new_start = st.date_input("Start date", key=start_key)
+            with st.container(key="quick_edit_overlay"):
+                st.markdown("**Quick edit**")
+                st.caption(row["label"])
+                new_start = st.date_input("Start date", key=start_key)
 
-                    # Start date changed since last run — shift the end
-                    # date to keep the same duration, unless the user
-                    # is the one who just changed the end date directly.
-                    if st.session_state[prev_start_key] != new_start:
-                        st.session_state[end_key] = new_start + timedelta(
-                            days=original_duration_days
-                        )
-                        st.session_state[prev_start_key] = new_start
-
-                    new_end = st.date_input("End date", key=end_key)
-
-                    percent_key = f"quick_percent_{clicked_id}"
-                    if percent_key not in st.session_state:
-                        st.session_state[percent_key] = int(
-                            row.get("percent_complete") or 0
-                        )
-                    new_percent = st.number_input(
-                        "Actual % complete",
-                        min_value=0,
-                        max_value=100,
-                        step=1,
-                        key=percent_key,
-                        help=(
-                            "This is what draw milestones on the Budget "
-                            "page check against — keep it current."
-                        ),
+                # Start date changed since last run — shift the end
+                # date to keep the same duration, unless the user
+                # is the one who just changed the end date directly.
+                if st.session_state[prev_start_key] != new_start:
+                    st.session_state[end_key] = new_start + timedelta(
+                        days=original_duration_days
                     )
+                    st.session_state[prev_start_key] = new_start
 
-                    if st.button("Update Task", key=f"quick_update_{clicked_id}"):
-                        if new_end < new_start:
-                            st.error(
-                                "End date must be on or after the start date."
-                            )
+                new_end = st.date_input("End date", key=end_key)
+
+                percent_key = f"quick_percent_{clicked_id}"
+                if percent_key not in st.session_state:
+                    st.session_state[percent_key] = int(
+                        row.get("percent_complete") or 0
+                    )
+                new_percent = st.number_input(
+                    "Actual % complete",
+                    min_value=0,
+                    max_value=100,
+                    step=1,
+                    key=percent_key,
+                    help=(
+                        "This is what draw milestones on the Budget "
+                        "page check against — keep it current."
+                    ),
+                )
+
+                if st.button("Update Task", key=f"quick_update_{clicked_id}"):
+                    if new_end < new_start:
+                        st.error(
+                            "End date must be on or after the start date."
+                        )
+                    else:
+                        update_payload = {
+                            "start_date": new_start.isoformat(),
+                            "estimated_end_date": new_end.isoformat(),
+                            "percent_complete": new_percent,
+                        }
+                        # Percent is the single source of truth for
+                        # status whenever it's touched here —
+                        # always fully in sync in both directions,
+                        # including un-completing on a correction
+                        # (e.g. 100% hit by mistake, dialed back
+                        # down): 100% -> Completed, 0% -> Pending,
+                        # anything in between -> In Progress.
+                        if new_percent == 100:
+                            update_payload["status"] = "Completed"
+                        elif new_percent == 0:
+                            update_payload["status"] = "Pending"
                         else:
-                            update_payload = {
-                                "start_date": new_start.isoformat(),
-                                "estimated_end_date": new_end.isoformat(),
-                                "percent_complete": new_percent,
-                            }
-                            # Percent is the single source of truth for
-                            # status whenever it's touched here —
-                            # always fully in sync in both directions,
-                            # including un-completing on a correction
-                            # (e.g. 100% hit by mistake, dialed back
-                            # down): 100% -> Completed, 0% -> Pending,
-                            # anything in between -> In Progress.
-                            if new_percent == 100:
-                                update_payload["status"] = "Completed"
-                            elif new_percent == 0:
-                                update_payload["status"] = "Pending"
-                            else:
-                                update_payload["status"] = "In Progress"
+                            update_payload["status"] = "In Progress"
 
-                            supabase.table("line_items").update(
-                                update_payload
-                            ).eq("id", clicked_id).execute()
-                            change_desc = _format_quick_edit_change(
-                                row["label"],
-                                row["start_date"].date(),
-                                row["estimated_end_date"].date(),
-                                int(row.get("percent_complete") or 0),
-                                new_start,
-                                new_end,
-                                new_percent,
-                            )
-                            if change_desc:
-                                st.session_state[pending_key].append(change_desc)
-                            del st.session_state[start_key]
-                            del st.session_state[end_key]
-                            del st.session_state[prev_start_key]
-                            del st.session_state[percent_key]
-                            st.success("Updated. Publish when ready to notify the team.")
-                            st.rerun()
+                        supabase.table("line_items").update(
+                            update_payload
+                        ).eq("id", clicked_id).execute()
+                        change_desc = _format_quick_edit_change(
+                            row["label"],
+                            row["start_date"].date(),
+                            row["estimated_end_date"].date(),
+                            int(row.get("percent_complete") or 0),
+                            new_start,
+                            new_end,
+                            new_percent,
+                        )
+                        if change_desc:
+                            st.session_state[pending_key].append(change_desc)
+                        del st.session_state[start_key]
+                        del st.session_state[end_key]
+                        del st.session_state[prev_start_key]
+                        del st.session_state[percent_key]
+                        st.success("Updated. Publish when ready to notify the team.")
+                        st.rerun()
 
     with st.expander("🔧 Adjust Active Timeline"):
         adjust_key = f"adjust_tasks_{property_id}"
