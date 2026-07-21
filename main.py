@@ -33,6 +33,35 @@ def _access_denied():
 ACCESS_TOKEN = get_setting("ACCESS_TOKEN")
 provided_token = st.query_params.get("token")
 
+# A short, memorable /demo link (no query string at all) is equivalent to
+# supplying the demo token directly — resolved into provided_token right
+# away so everything below (including the icon rail's link-building,
+# which reads provided_token) behaves exactly as if ?token=<demo token>
+# had been on the URL from the start.
+if not provided_token:
+    try:
+        from urllib.parse import urlparse
+
+        current_path = urlparse(st.context.url).path.strip("/").lower()
+    except Exception:
+        current_path = ""
+    if current_path == "demo":
+        try:
+            from db.connection import get_supabase_client
+            from services.demo_access import get_demo_token
+
+            provided_token = get_demo_token(get_supabase_client())
+        except Exception:
+            provided_token = None
+        # "/demo" isn't a registered page path, so Streamlit briefly
+        # flashes its own "Page not found" toast before falling back to
+        # the default (Dashboard) page — tried redirecting past it with
+        # st.switch_page, but calling it this early (before
+        # st.navigation().run() has established a navigation context for
+        # this run) sent the app into a repeating "not found" loop
+        # instead. The toast is a cosmetic wrinkle, not a broken link —
+        # left as-is rather than fighting Streamlit's router further.
+
 # Constant-time comparison — a plain `!=` leaks how many leading
 # characters matched via response-time differences, which matters for a
 # token gate like this one.
