@@ -212,6 +212,69 @@ def set_property_telegram_chat_id(
     ).execute()
 
 
+def set_property_archived(supabase: Client, property_id: str, archived: bool) -> None:
+    """Archiving doesn't touch or hide any data — every page that allows
+    edits (Dashboard/Schedule/Budget/Journal) checks this flag itself and
+    shows a read-only banner instead of its normal controls."""
+    supabase.table("properties").update({"archived": archived}).eq(
+        "id", property_id
+    ).execute()
+
+
+def delete_property_cascade(supabase: Client, property_id: str) -> None:
+    """Permanently deletes a property and everything under it.
+
+    Deletes children explicitly in dependency order rather than relying
+    on ON DELETE CASCADE — units/line_items predate this session and
+    their FK behavior was never directly confirmed, so this is correct
+    whether or not cascades are configured (deleting an already-cascaded
+    row is just a harmless no-op).
+    """
+    units = (
+        supabase.table("units").select("id").eq("property_id", property_id).execute().data
+    )
+    unit_ids = [u["id"] for u in units]
+
+    line_item_ids = []
+    if unit_ids:
+        line_items = (
+            supabase.table("line_items")
+            .select("id")
+            .in_("unit_id", unit_ids)
+            .execute()
+            .data
+        )
+        line_item_ids = [i["id"] for i in line_items]
+
+    milestones = (
+        supabase.table("draw_milestones")
+        .select("id")
+        .eq("property_id", property_id)
+        .execute()
+        .data
+    )
+    milestone_ids = [m["id"] for m in milestones]
+    if milestone_ids:
+        supabase.table("draw_milestone_tasks").delete().in_(
+            "milestone_id", milestone_ids
+        ).execute()
+    supabase.table("draw_milestones").delete().eq("property_id", property_id).execute()
+
+    supabase.table("journal_entries").delete().eq("property_id", property_id).execute()
+    supabase.table("material_logs").delete().eq("property_id", property_id).execute()
+    try:
+        supabase.table("activity_log").delete().eq("property_id", property_id).execute()
+    except Exception:
+        pass  # migration_activity_log.sql not run yet — nothing to clean up
+
+    if line_item_ids:
+        supabase.table("line_items").delete().in_("id", line_item_ids).execute()
+    if unit_ids:
+        supabase.table("units").delete().in_("id", unit_ids).execute()
+
+    supabase.table("properties").delete().eq("id", property_id).execute()
+
+
 def clear_property_telegram_chat_id(supabase: Client, property_id: str) -> None:
     supabase.table("properties").update({"telegram_chat_id": None}).eq(
         "id", property_id

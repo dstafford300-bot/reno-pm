@@ -28,7 +28,7 @@ def render():
     try:
         properties = (
             supabase.table("properties")
-            .select("id, property_name, telegram_chat_id")
+            .select("id, property_name, telegram_chat_id, archived")
             .order("property_name")
             .execute()
             .data
@@ -43,6 +43,7 @@ def render():
         )
         for p in properties:
             p["telegram_chat_id"] = None
+            p["archived"] = False
 
     if not properties:
         st.info("No properties yet. Upload a SOW to get started.")
@@ -53,6 +54,13 @@ def render():
         p for p in properties if p["property_name"] == selected_name
     )
     property_id = selected_property["id"]
+    is_archived = bool(selected_property.get("archived"))
+
+    if is_archived:
+        st.info(
+            "🔒 This project is finished and read-only — milestone actions "
+            "are disabled. Reopen it from the Dashboard to make changes again."
+        )
 
     units = (
         supabase.table("units")
@@ -147,6 +155,7 @@ def render():
                         "Authorize Draw Release",
                         key=f"release_{m['id']}",
                         width="stretch",
+                        disabled=is_archived,
                     ):
                         release_draw_milestone(supabase, m["id"])
                         log_activity(
@@ -186,7 +195,10 @@ def render():
                         del st.session_state[confirm_key]
                         st.rerun()
                 elif st.button(
-                    "🗑️ Delete Milestone", key=f"delete_{m['id']}", width="stretch"
+                    "🗑️ Delete Milestone",
+                    key=f"delete_{m['id']}",
+                    width="stretch",
+                    disabled=is_archived,
                 ):
                     st.session_state[confirm_key] = True
                     st.rerun()
@@ -222,7 +234,9 @@ def render():
                 {"line_item_id": item_id, "required_percent": required_percent}
             )
 
-        if st.button("Add Milestone", type="primary", width="stretch"):
+        if st.button(
+            "Add Milestone", type="primary", width="stretch", disabled=is_archived
+        ):
             if not milestone_name.strip():
                 st.warning("Enter a milestone name first.")
             else:

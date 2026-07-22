@@ -66,7 +66,7 @@ def render():
     try:
         properties = (
             supabase.table("properties")
-            .select("id, property_name, telegram_chat_id")
+            .select("id, property_name, telegram_chat_id, archived")
             .order("property_name")
             .execute()
             .data
@@ -81,6 +81,7 @@ def render():
         )
         for p in properties:
             p["telegram_chat_id"] = None
+            p["archived"] = False
 
     if not properties:
         st.info("No properties yet. Upload a SOW to get started.")
@@ -93,6 +94,14 @@ def render():
         p for p in properties if p["property_name"] == selected_property_name
     )
     property_id = selected_property["id"]
+    is_archived = bool(selected_property.get("archived"))
+
+    if is_archived:
+        st.info(
+            "🔒 This project is finished and read-only — editing is disabled. "
+            "Reopen it from the Dashboard's Project Status section to make "
+            "changes again."
+        )
 
     units = (
         supabase.table("units")
@@ -273,7 +282,11 @@ def render():
                     ),
                 )
 
-                if st.button("Update Task", key=f"quick_update_{clicked_id}"):
+                if st.button(
+                    "Update Task",
+                    key=f"quick_update_{clicked_id}",
+                    disabled=is_archived,
+                ):
                     if new_end < new_start:
                         st.error(
                             "End date must be on or after the start date."
@@ -327,7 +340,10 @@ def render():
             placeholder="e.g. Push framing start date back by 4 days",
         )
         if st.button(
-            "Preview Adjustment", key="preview_adjustment", width="stretch"
+            "Preview Adjustment",
+            key="preview_adjustment",
+            width="stretch",
+            disabled=is_archived,
         ):
             if not instruction.strip():
                 st.warning("Enter a change first.")
@@ -369,6 +385,7 @@ def render():
                 type="primary",
                 key="apply_adjustment",
                 width="stretch",
+                disabled=is_archived,
             ):
                 with st.spinner("Updating Supabase..."):
                     try:

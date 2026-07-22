@@ -8,8 +8,10 @@ import streamlit as st
 from db.connection import get_supabase_client
 from services.db_writer import (
     clear_property_telegram_chat_id,
+    delete_property_cascade,
     log_activity,
     publish_draft_timeline,
+    set_property_archived,
     set_property_telegram_chat_id,
     update_line_item_status,
 )
@@ -199,15 +201,15 @@ def render():
     try:
         properties = (
             supabase.table("properties")
-            .select("id, property_name, telegram_chat_id")
+            .select("id, property_name, telegram_chat_id, archived")
             .order("property_name")
             .execute()
             .data
         )
     except Exception:
-        # telegram_chat_id column not migrated onto properties yet — degrade
-        # gracefully so the rest of the Dashboard still works; the Telegram
-        # Group Sync section just won't have anything to link to yet.
+        # telegram_chat_id/archived not migrated onto properties yet —
+        # degrade gracefully so the rest of the Dashboard still works;
+        # those sections just won't have anything to show/lock yet.
         properties = (
             supabase.table("properties")
             .select("id, property_name")
@@ -217,6 +219,7 @@ def render():
         )
         for p in properties:
             p["telegram_chat_id"] = None
+            p["archived"] = False
 
     if not properties:
         st.info("No properties yet. Upload a SOW to get started.")
@@ -268,6 +271,66 @@ def render():
         p for p in properties if p["property_name"] == selected_name
     )
     property_id = selected_property["id"]
+    is_archived = bool(selected_property.get("archived"))
+
+    if is_archived:
+        st.info(
+            "🔒 This project is finished and read-only. All data below is "
+            "still fully viewable — reopen it below to make changes again."
+        )
+
+    with st.expander("📁 Project Status"):
+        if is_archived:
+            st.success("This project is marked **finished** (read-only).")
+            if st.button("↩️ Reopen Project", width="stretch"):
+                set_property_archived(supabase, property_id, False)
+                st.success("Reopened — editing is available again.")
+                st.rerun()
+        else:
+            st.caption(
+                "Marking a project finished locks it from further edits "
+                "everywhere (Schedule, Budget, Journal, status changes) "
+                "while keeping everything viewable. Reversible anytime."
+            )
+            if st.button("✅ Mark Project Finished", width="stretch"):
+                set_property_archived(supabase, property_id, True)
+                st.success("Marked finished — this project is now read-only.")
+                st.rerun()
+
+        st.divider()
+        st.caption(
+            "⚠️ Permanently deletes this property and everything under it "
+            "(schedule, budget, materials, journal) — cannot be undone."
+        )
+        delete_confirm_key = f"confirm_delete_property_{property_id}"
+        if st.session_state.get(delete_confirm_key):
+            st.warning(
+                f"Type the property name exactly to confirm permanent "
+                f"deletion of **{selected_name}**:"
+            )
+            typed_name = st.text_input(
+                "Confirm property name", key=f"delete_confirm_input_{property_id}"
+            )
+            col_yes, col_no = st.columns(2)
+            if col_yes.button(
+                "Delete Permanently",
+                key=f"delete_yes_{property_id}",
+                type="primary",
+                disabled=(typed_name != selected_name),
+                width="stretch",
+            ):
+                delete_property_cascade(supabase, property_id)
+                del st.session_state[delete_confirm_key]
+                st.success(f"{selected_name} has been permanently deleted.")
+                st.rerun()
+            if col_no.button(
+                "Cancel", key=f"delete_no_{property_id}", width="stretch"
+            ):
+                del st.session_state[delete_confirm_key]
+                st.rerun()
+        elif st.button("🗑️ Delete Project Permanently", width="stretch"):
+            st.session_state[delete_confirm_key] = True
+            st.rerun()
 
     with st.expander(
         "🔗 Telegram Group Sync",
@@ -335,7 +398,10 @@ def render():
         )
 
     if not line_items:
-        _render_timeline_sandbox(supabase, property_id, selected_name)
+        if is_archived:
+            st.info("No schedule was published before this project was finished.")
+        else:
+            _render_timeline_sandbox(supabase, property_id, selected_name)
         return
 
     # --- KPIs ---
@@ -406,9 +472,10 @@ def render():
                     index=STATUS_OPTIONS.index(current_status),
                     key=f"status_{item['id']}",
                     label_visibility="collapsed",
+                    disabled=is_archived,
                 )
 
-            if new_status != current_status:
+            if new_status != current_status and not is_archived:
                 update_line_item_status(supabase, item["id"], new_status)
                 log_activity(
                     supabase,

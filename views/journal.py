@@ -16,7 +16,7 @@ def render():
     try:
         properties = (
             supabase.table("properties")
-            .select("id, property_name, telegram_chat_id")
+            .select("id, property_name, telegram_chat_id, archived")
             .order("property_name")
             .execute()
             .data
@@ -31,6 +31,7 @@ def render():
         )
         for p in properties:
             p["telegram_chat_id"] = None
+            p["archived"] = False
 
     if not properties:
         st.info("No properties yet. Upload a SOW to get started.")
@@ -42,6 +43,14 @@ def render():
     )
     property_id = selected_property["id"]
     chat_id = selected_property.get("telegram_chat_id")
+    is_archived = bool(selected_property.get("archived"))
+
+    if is_archived:
+        st.info(
+            "🔒 This project is finished and read-only — syncing and "
+            "task-linking are disabled. Reopen it from the Dashboard to "
+            "make changes again."
+        )
 
     if not chat_id:
         st.info(
@@ -50,7 +59,7 @@ def render():
         )
         return
 
-    if st.button("🔄 Sync Journal from Telegram"):
+    if st.button("🔄 Sync Journal from Telegram", disabled=is_archived):
         with st.spinner("Fetching messages and asking Jeeves to filter..."):
             try:
                 result = sync_property_journal(supabase, property_id, chat_id)
@@ -138,8 +147,9 @@ def render():
                 index=default_index,
                 key=f"journal_link_{entry['id']}",
                 label_visibility="collapsed",
+                disabled=is_archived,
             )
-            if choice != (linked_name or "(none)"):
+            if choice != (linked_name or "(none)") and not is_archived:
                 new_id = None
                 if choice != "(none)":
                     new_id = next(
