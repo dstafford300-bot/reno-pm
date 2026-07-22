@@ -338,6 +338,11 @@ def render():
     ):
         if selected_property.get("telegram_chat_id"):
             st.success(f"Linked to chat ID `{selected_property['telegram_chat_id']}`")
+            if st.button("🔄 Refresh Pinned Link", key="refresh_portal_link"):
+                send_and_pin_portal_link(
+                    property_id, selected_property.get("telegram_chat_id")
+                )
+                st.success("Re-sent and re-pinned the portal link.")
             if st.button("Unlink this group", key="unlink_telegram_group"):
                 clear_property_telegram_chat_id(supabase, property_id)
                 st.success("Unlinked. This property has no Telegram group for now.")
