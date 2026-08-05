@@ -14,12 +14,17 @@ import imaplib
 
 from supabase import Client
 
-from services.db_writer import create_material_log, get_line_items_with_labels
+from services.db_writer import (
+    check_line_item_overrun,
+    create_material_log,
+    get_line_items_with_labels,
+)
 from services.receipt_parser import (
     match_line_item_from_receipt,
     match_property_from_text,
     parse_receipt_text,
 )
+from services.telegram_bot import send_cost_overrun_alert
 from utils.settings import get_setting
 
 IMAP_SERVER = "imap.gmail.com"
@@ -148,6 +153,21 @@ def sync_email_receipts(supabase: Client, properties: list[dict]) -> dict:
                     line_items_json=parsed.get("line_items"),
                     line_item_id=line_item_id,
                 )
+                if line_item_id:
+                    try:
+                        overrun = check_line_item_overrun(supabase, line_item_id)
+                        if overrun:
+                            send_cost_overrun_alert(
+                                property_name=overrun["property_name"],
+                                unit_name=overrun["unit_name"],
+                                task_name=overrun["task_name"],
+                                budgeted_cost=overrun["budgeted_cost"],
+                                spent=overrun["spent"],
+                                percent=overrun["percent"],
+                                chat_id=overrun["chat_id"],
+                            )
+                    except Exception:
+                        pass  # a missed overrun alert shouldn't fail the sync job
                 if property_id is None:
                     unassigned += 1
                 processed += 1

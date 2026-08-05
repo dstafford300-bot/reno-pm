@@ -407,6 +407,42 @@ def send_draw_release_alert(
     return send_telegram_message(target_chat_id, message)
 
 
+def format_cost_overrun_alert(
+    property_name: str,
+    unit_name: str,
+    task_name: str,
+    budgeted_cost: float,
+    spent: float,
+    percent: float,
+) -> str:
+    return (
+        f"⚠️ <b>Budget Overrun Warning</b>\n\n"
+        f"🎩 I regret to report a matter of some concern from "
+        f"<b>{html.escape(property_name)}</b>.\n\n"
+        f"🛠️ <b>Task:</b> {html.escape(unit_name)}: {html.escape(task_name)}\n"
+        f"💷 <b>Budgeted:</b> ${budgeted_cost:,.2f}\n"
+        f"🧾 <b>Materials logged so far:</b> ${spent:,.2f} "
+        f"({percent * 100:.0f}% of budget)\n\n"
+        f"I recommend a review at your earliest convenience, sir."
+    )
+
+
+def send_cost_overrun_alert(
+    property_name: str,
+    unit_name: str,
+    task_name: str,
+    budgeted_cost: float,
+    spent: float,
+    percent: float,
+    chat_id: str | None = None,
+) -> bool:
+    target_chat_id = chat_id or _get_default_chat_id()
+    message = format_cost_overrun_alert(
+        property_name, unit_name, task_name, budgeted_cost, spent, percent
+    )
+    return send_telegram_message(target_chat_id, message)
+
+
 def get_file_url(file_id: str) -> str | None:
     """Resolve a Telegram file_id (e.g. from a photo) to a downloadable
     URL. Returns None on any failure."""

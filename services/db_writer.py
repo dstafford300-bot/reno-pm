@@ -70,6 +70,82 @@ def assign_material_log_line_item(
     )
 
 
+OVERRUN_ALERT_THRESHOLD = 0.9
+
+
+def check_line_item_overrun(supabase: Client, line_item_id: str) -> dict | None:
+    """Checks whether this task's total logged material spend has crossed
+    OVERRUN_ALERT_THRESHOLD (90%) of its budgeted_cost. If so, flags it
+    (overrun_alerted) so this fires exactly once per task rather than on
+    every subsequent purchase, and returns the context needed to send a
+    Telegram alert. Returns None if not over threshold, already alerted,
+    or the task has no budgeted_cost to compare against.
+
+    Call this right after logging or (re)assigning a material purchase to
+    a line_item_id — see views/budget.py and services/email_receipts.py.
+    """
+    rows = (
+        supabase.table("line_items")
+        .select("id, task_name, unit_id, budgeted_cost, overrun_alerted")
+        .eq("id", line_item_id)
+        .execute()
+        .data
+    )
+    if not rows:
+        return None
+    item = rows[0]
+    if item.get("overrun_alerted"):
+        return None
+    budgeted = item.get("budgeted_cost") or 0
+    if budgeted <= 0:
+        return None
+
+    logs = (
+        supabase.table("material_logs")
+        .select("amount")
+        .eq("line_item_id", line_item_id)
+        .execute()
+        .data
+    )
+    spent = sum(log.get("amount") or 0 for log in logs)
+    percent = spent / budgeted
+    if percent < OVERRUN_ALERT_THRESHOLD:
+        return None
+
+    unit_rows = (
+        supabase.table("units")
+        .select("unit_name, property_id")
+        .eq("id", item["unit_id"])
+        .execute()
+        .data
+    )
+    if not unit_rows:
+        return None
+    unit = unit_rows[0]
+    prop_rows = (
+        supabase.table("properties")
+        .select("property_name, telegram_chat_id")
+        .eq("id", unit["property_id"])
+        .execute()
+        .data
+    )
+    prop = prop_rows[0] if prop_rows else {}
+
+    supabase.table("line_items").update({"overrun_alerted": True}).eq(
+        "id", line_item_id
+    ).execute()
+
+    return {
+        "task_name": item["task_name"],
+        "unit_name": unit["unit_name"],
+        "property_name": prop.get("property_name"),
+        "chat_id": prop.get("telegram_chat_id"),
+        "budgeted_cost": budgeted,
+        "spent": spent,
+        "percent": percent,
+    }
+
+
 def get_line_items_with_labels(supabase: Client, property_id: str) -> list[dict]:
     """[{"id": ..., "label": "Unit Name: Task Name"}, ...] for every line
     item under property_id — shared by every receipt-matching flow

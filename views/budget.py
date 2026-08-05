@@ -6,6 +6,7 @@ from db.connection import get_supabase_client
 from services.db_writer import (
     assign_material_log_line_item,
     assign_material_log_property,
+    check_line_item_overrun,
     create_draw_milestone,
     create_material_log,
     delete_draw_milestone,
@@ -22,8 +23,36 @@ from services.receipt_parser import (
     match_property_from_text,
     parse_receipt_text,
 )
-from services.telegram_bot import send_draw_release_alert
+from services.telegram_bot import send_cost_overrun_alert, send_draw_release_alert
 from utils.mobile import inject_mobile_button_css, inject_mobile_card_css
+
+
+def _fire_overrun_alert_if_crossed(supabase, line_item_id: str | None) -> None:
+    """Best-effort: checks whether assigning this purchase just pushed the
+    task's spend over the alert threshold, and if so fires the Telegram
+    alert in the background. No-ops silently on any failure — a missed
+    overrun alert shouldn't block saving/assigning a purchase."""
+    if not line_item_id:
+        return
+    try:
+        overrun = check_line_item_overrun(supabase, line_item_id)
+    except Exception:
+        return
+    if not overrun:
+        return
+    threading.Thread(
+        target=send_cost_overrun_alert,
+        kwargs=dict(
+            property_name=overrun["property_name"],
+            unit_name=overrun["unit_name"],
+            task_name=overrun["task_name"],
+            budgeted_cost=overrun["budgeted_cost"],
+            spent=overrun["spent"],
+            percent=overrun["percent"],
+            chat_id=overrun["chat_id"],
+        ),
+        daemon=True,
+    ).start()
 
 
 def render():
@@ -193,6 +222,7 @@ def render():
                             if row["label"] == task_choice
                         )
                         assign_material_log_line_item(supabase, log["id"], chosen_id)
+                        _fire_overrun_alert_if_crossed(supabase, chosen_id)
                         st.rerun()
 
     st.divider()
@@ -432,6 +462,7 @@ def render():
                     line_items_json=parsed.get("line_items"),
                     line_item_id=task_choice_id,
                 )
+                _fire_overrun_alert_if_crossed(supabase, task_choice_id)
                 del st.session_state["parsed_receipt"]
                 del st.session_state["parsed_receipt_raw"]
                 st.session_state.pop("suggested_task_id", None)
