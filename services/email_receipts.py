@@ -14,8 +14,12 @@ import imaplib
 
 from supabase import Client
 
-from services.db_writer import create_material_log
-from services.receipt_parser import match_property_from_text, parse_receipt_text
+from services.db_writer import create_material_log, get_line_items_with_labels
+from services.receipt_parser import (
+    match_line_item_from_receipt,
+    match_property_from_text,
+    parse_receipt_text,
+)
 from utils.settings import get_setting
 
 IMAP_SERVER = "imap.gmail.com"
@@ -125,6 +129,14 @@ def sync_email_receipts(supabase: Client, properties: list[dict]) -> dict:
 
                 property_id = match_property_from_text(body, properties)
 
+                line_item_id = None
+                if property_id:
+                    try:
+                        candidates = get_line_items_with_labels(supabase, property_id)
+                        line_item_id = match_line_item_from_receipt(body, candidates)
+                    except Exception:
+                        pass  # task matching is best-effort, never blocks the log
+
                 create_material_log(
                     supabase,
                     store=parsed.get("store_name", "Unknown"),
@@ -134,6 +146,7 @@ def sync_email_receipts(supabase: Client, properties: list[dict]) -> dict:
                     receipt_details=body[:5000],
                     source="email",
                     line_items_json=parsed.get("line_items"),
+                    line_item_id=line_item_id,
                 )
                 if property_id is None:
                     unassigned += 1

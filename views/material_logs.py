@@ -1,6 +1,7 @@
 import streamlit as st
 
 from db.connection import get_supabase_client
+from services.db_writer import get_line_items_with_labels
 from utils.mobile import inject_mobile_button_css, inject_mobile_card_css
 
 
@@ -32,7 +33,7 @@ def render():
             supabase.table("material_logs")
             .select(
                 "id, store, amount, purchase_date, receipt_details, photo_url, "
-                "source, line_items_json"
+                "source, line_items_json, line_item_id"
             )
             .eq("property_id", property_id)
             .order("purchase_date", desc=True)
@@ -46,6 +47,14 @@ def render():
             "SQL Editor, then refresh."
         )
         return
+
+    try:
+        task_label_by_id = {
+            row["id"]: row["label"]
+            for row in get_line_items_with_labels(supabase, property_id)
+        }
+    except Exception:
+        task_label_by_id = {}
 
     total_spent = sum(log.get("amount") or 0 for log in logs)
     st.metric("Total Materials Logged", f"${total_spent:,.2f}")
@@ -65,6 +74,9 @@ def render():
             with col_info:
                 st.markdown(f"**{log['store']}** — ${log['amount']:,.2f}")
                 st.caption(f"{log.get('purchase_date') or ''} · via {log.get('source')}")
+                task_label = task_label_by_id.get(log.get("line_item_id"))
+                if task_label:
+                    st.caption(f"🔧 {task_label}")
                 if log.get("receipt_details"):
                     st.caption(log["receipt_details"][:300])
                 for li in log.get("line_items_json") or []:

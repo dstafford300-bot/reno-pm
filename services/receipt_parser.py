@@ -2,6 +2,29 @@ import re
 
 from utils.anthropic_client import get_anthropic_client, get_model
 
+MATCH_LINE_ITEM_TOOL = {
+    "name": "record_task_match",
+    "description": (
+        "Record which single scope-of-work task (if any) a hardware/"
+        "materials purchase was most likely bought for."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "matched_label": {
+                "type": ["string", "null"],
+                "description": (
+                    "The exact label (from the provided list) of the one "
+                    "task this purchase's items are most clearly for, or "
+                    "null if nothing on the list is a clear, confident "
+                    "match — don't guess."
+                ),
+            }
+        },
+        "required": ["matched_label"],
+    },
+}
+
 RECEIPT_TOOL = {
     "name": "record_receipt",
     "description": (
@@ -101,6 +124,56 @@ def match_property_from_text(text: str, properties: list[dict]) -> str | None:
             if re.search(rf"\b{re.escape(token_clean)}\b", lowered):
                 return prop["id"]
     return None
+
+
+def match_line_item_from_receipt(
+    receipt_text: str, line_items: list[dict]
+) -> str | None:
+    """line_items: [{"id": ..., "label": "Unit Name: Task Name"}, ...].
+
+    Asks Claude which single task (if any) this purchase was most likely
+    for, based on the actual items purchased — more accurate than
+    keyword/cost_group matching since receipt line items ("2x4x8 Lumber")
+    rarely spell out the trade/phase name in the SOW task ("Framing").
+    Returns None (no assignment) rather than guessing when nothing is a
+    clear match — a wrong task assignment quietly corrupts that task's
+    cost variance, which is worse than leaving it unassigned for a human
+    to confirm.
+    """
+    if not line_items:
+        return None
+
+    label_to_id = {item["label"]: item["id"] for item in line_items}
+    options_text = "\n".join(f"- {label}" for label in label_to_id)
+
+    client = get_anthropic_client()
+    message = client.messages.create(
+        model=get_model(),
+        max_tokens=1024,
+        system=(
+            "You are matching a hardware/materials store receipt to the "
+            "single scope-of-work task it was most likely purchased for, "
+            "out of a fixed list of candidate tasks. Only match if the "
+            "purchased items clearly relate to one specific task on the "
+            "list — if the receipt is generic, ambiguous, or could "
+            "plausibly apply to several tasks, return null rather than "
+            "guessing."
+        ),
+        tools=[MATCH_LINE_ITEM_TOOL],
+        tool_choice={"type": "tool", "name": "record_task_match"},
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Receipt:\n{receipt_text}\n\n"
+                    f"Candidate tasks:\n{options_text}"
+                ),
+            }
+        ],
+    )
+    tool_use = next(block for block in message.content if block.type == "tool_use")
+    matched_label = tool_use.input.get("matched_label")
+    return label_to_id.get(matched_label)
 
 
 def extract_amount_hint(text: str) -> float | None:

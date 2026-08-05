@@ -29,6 +29,7 @@ def create_material_log(
     photo_url: str | None = None,
     source: str = "manual",
     line_items_json: list[dict] | None = None,
+    line_item_id: str | None = None,
 ) -> dict:
     payload = {
         "store": store,
@@ -38,6 +39,7 @@ def create_material_log(
         "photo_url": photo_url,
         "source": source,
         "line_items_json": line_items_json,
+        "line_item_id": line_item_id,
     }
     if purchase_date:
         payload["purchase_date"] = purchase_date
@@ -54,6 +56,117 @@ def assign_material_log_property(
         .execute()
         .data[0]
     )
+
+
+def assign_material_log_line_item(
+    supabase: Client, material_log_id: str, line_item_id: str | None
+) -> dict:
+    return (
+        supabase.table("material_logs")
+        .update({"line_item_id": line_item_id})
+        .eq("id", material_log_id)
+        .execute()
+        .data[0]
+    )
+
+
+def get_line_items_with_labels(supabase: Client, property_id: str) -> list[dict]:
+    """[{"id": ..., "label": "Unit Name: Task Name"}, ...] for every line
+    item under property_id — shared by every receipt-matching flow
+    (pasted receipts, email receipts) so a purchase can be matched to a
+    specific task regardless of which property it landed on."""
+    units = (
+        supabase.table("units")
+        .select("id, unit_name")
+        .eq("property_id", property_id)
+        .execute()
+        .data
+    )
+    unit_ids = [u["id"] for u in units]
+    if not unit_ids:
+        return []
+    unit_name_by_id = {u["id"]: u["unit_name"] for u in units}
+    items = (
+        supabase.table("line_items")
+        .select("id, unit_id, task_name")
+        .in_("unit_id", unit_ids)
+        .execute()
+        .data
+    )
+    return [
+        {
+            "id": item["id"],
+            "label": f"{unit_name_by_id.get(item['unit_id'])}: {item['task_name']}",
+        }
+        for item in items
+    ]
+
+
+def get_line_item_cost_variance(supabase: Client, property_id: str) -> list[dict]:
+    """For every line item under this property, compares budgeted_cost
+    against actual material spend logged against it (material_logs rows
+    with a matching line_item_id). Purchases with no line_item_id
+    (unassigned) aren't counted against any task's variance — they show
+    up separately so the PM can assign them.
+
+    Returns rows sorted by variance ascending (most over-budget first),
+    limited to tasks that have at least one logged purchase — tasks with
+    zero spend logged aren't interesting to show here.
+    """
+    units = (
+        supabase.table("units")
+        .select("id, unit_name")
+        .eq("property_id", property_id)
+        .execute()
+        .data
+    )
+    unit_ids = [u["id"] for u in units]
+    unit_name_by_id = {u["id"]: u["unit_name"] for u in units}
+    if not unit_ids:
+        return []
+
+    line_items = (
+        supabase.table("line_items")
+        .select("id, unit_id, task_name, budgeted_cost")
+        .in_("unit_id", unit_ids)
+        .execute()
+        .data
+    )
+    if not line_items:
+        return []
+
+    logs = (
+        supabase.table("material_logs")
+        .select("line_item_id, amount")
+        .eq("property_id", property_id)
+        .not_.is_("line_item_id", "null")
+        .execute()
+        .data
+    )
+    spent_by_item: dict[str, float] = {}
+    for log in logs:
+        spent_by_item[log["line_item_id"]] = (
+            spent_by_item.get(log["line_item_id"], 0) + (log.get("amount") or 0)
+        )
+
+    results = []
+    for item in line_items:
+        spent = spent_by_item.get(item["id"])
+        if not spent:
+            continue
+        budgeted = item.get("budgeted_cost") or 0
+        results.append(
+            {
+                "line_item_id": item["id"],
+                "task_name": item["task_name"],
+                "unit_name": unit_name_by_id.get(item["unit_id"]),
+                "budgeted_cost": budgeted,
+                "spent": spent,
+                "variance": budgeted - spent,
+            }
+        )
+    results.sort(key=lambda r: r["variance"])
+    return results
 
 
 def create_draw_milestone(

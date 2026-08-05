@@ -4,17 +4,24 @@ import streamlit as st
 
 from db.connection import get_supabase_client
 from services.db_writer import (
+    assign_material_log_line_item,
     assign_material_log_property,
     create_draw_milestone,
     create_material_log,
     delete_draw_milestone,
+    get_line_item_cost_variance,
+    get_line_items_with_labels,
     get_milestone_task_progress,
     log_activity,
     milestone_is_eligible,
     release_draw_milestone,
 )
 from services.email_receipts import sync_email_receipts
-from services.receipt_parser import match_property_from_text, parse_receipt_text
+from services.receipt_parser import (
+    match_line_item_from_receipt,
+    match_property_from_text,
+    parse_receipt_text,
+)
 from services.telegram_bot import send_draw_release_alert
 from utils.mobile import inject_mobile_button_css, inject_mobile_card_css
 
@@ -74,11 +81,12 @@ def render():
     if unit_ids:
         line_items = (
             supabase.table("line_items")
-            .select("id, task_name, budgeted_cost")
+            .select("id, unit_id, task_name, budgeted_cost")
             .in_("unit_id", unit_ids)
             .execute()
             .data
         )
+    line_item_labels = get_line_items_with_labels(supabase, property_id)
 
     try:
         milestones = (
@@ -116,6 +124,76 @@ def render():
         f"${next_milestone['draw_amount']:,.0f}" if next_milestone else "—",
         help=next_milestone["milestone_name"] if next_milestone else None,
     )
+
+    st.divider()
+
+    st.subheader("📊 Cost Variance by Task")
+    st.caption(
+        "Compares each task's budgeted cost against material purchases "
+        "logged against it. Tasks with no purchases assigned yet aren't "
+        "shown — assign purchases to tasks below or from the receipt "
+        "import flow."
+    )
+    variance_migration_missing = False
+    try:
+        variance_rows = get_line_item_cost_variance(supabase, property_id)
+    except Exception:
+        variance_rows = []
+        variance_migration_missing = True
+        st.caption(
+            "Run scripts/migration_material_line_item.sql via Supabase's "
+            "SQL Editor to enable task-level cost tracking."
+        )
+    if variance_rows:
+        for row in variance_rows:
+            over = row["variance"] < 0
+            label = f"**{row['unit_name']}: {row['task_name']}**"
+            cols = st.columns([3, 1, 1, 1])
+            cols[0].markdown(label)
+            cols[1].caption(f"Budgeted ${row['budgeted_cost']:,.0f}")
+            cols[2].caption(f"Spent ${row['spent']:,.0f}")
+            if over:
+                cols[3].error(f"−${abs(row['variance']):,.0f}")
+            else:
+                cols[3].success(f"+${row['variance']:,.0f}")
+    elif not variance_migration_missing:
+        st.caption("No purchases have been assigned to a task yet.")
+
+    if not variance_migration_missing:
+        try:
+            untasked_logs = (
+                supabase.table("material_logs")
+                .select("id, store, amount, purchase_date, receipt_details")
+                .eq("property_id", property_id)
+                .is_("line_item_id", "null")
+                .order("purchase_date", desc=True)
+                .execute()
+                .data
+            )
+        except Exception:
+            untasked_logs = []
+        if untasked_logs and line_item_labels:
+            with st.expander(
+                f"🧮 Assign purchases to tasks ({len(untasked_logs)} unassigned)"
+            ):
+                for log in untasked_logs:
+                    st.markdown(f"**{log['store']}** — ${log['amount']:,.2f}")
+                    st.caption(log.get("purchase_date") or "")
+                    task_choice = st.selectbox(
+                        "Assign to task",
+                        ["(unassigned)"] + [row["label"] for row in line_item_labels],
+                        key=f"assign_task_{log['id']}",
+                        label_visibility="collapsed",
+                        disabled=is_archived,
+                    )
+                    if task_choice != "(unassigned)":
+                        chosen_id = next(
+                            row["id"]
+                            for row in line_item_labels
+                            if row["label"] == task_choice
+                        )
+                        assign_material_log_line_item(supabase, log["id"], chosen_id)
+                        st.rerun()
 
     st.divider()
 
@@ -297,6 +375,51 @@ def render():
                     "go into the Unassigned Materials queue below."
                 )
 
+            task_choice_id = None
+            if matched_id:
+                candidate_labels = (
+                    line_item_labels
+                    if matched_id == property_id
+                    else get_line_items_with_labels(supabase, matched_id)
+                )
+                if candidate_labels and "suggested_task_id" not in st.session_state:
+                    with st.spinner("Checking which task this was for..."):
+                        st.session_state["suggested_task_id"] = (
+                            match_line_item_from_receipt(
+                                st.session_state.get("parsed_receipt_raw", ""),
+                                candidate_labels,
+                            )
+                        )
+                label_options = ["(none — property-level only)"] + [
+                    row["label"] for row in candidate_labels
+                ]
+                suggested_id = st.session_state.get("suggested_task_id")
+                suggested_label = next(
+                    (
+                        row["label"]
+                        for row in candidate_labels
+                        if row["id"] == suggested_id
+                    ),
+                    None,
+                )
+                default_index = (
+                    label_options.index(suggested_label) if suggested_label else 0
+                )
+                if suggested_label:
+                    st.info(f"Suggested task: {suggested_label}")
+                task_label_choice = st.selectbox(
+                    "Assign to task (optional)",
+                    label_options,
+                    index=default_index,
+                    key="receipt_task_choice",
+                )
+                if task_label_choice != "(none — property-level only)":
+                    task_choice_id = next(
+                        row["id"]
+                        for row in candidate_labels
+                        if row["label"] == task_label_choice
+                    )
+
             if st.button("Save Receipt", key="save_receipt", width="stretch"):
                 create_material_log(
                     supabase,
@@ -307,9 +430,12 @@ def render():
                     receipt_details=st.session_state.get("parsed_receipt_raw"),
                     source="manual",
                     line_items_json=parsed.get("line_items"),
+                    line_item_id=task_choice_id,
                 )
                 del st.session_state["parsed_receipt"]
                 del st.session_state["parsed_receipt_raw"]
+                st.session_state.pop("suggested_task_id", None)
+                st.session_state.pop("receipt_task_choice", None)
                 st.success("Receipt saved.")
                 st.rerun()
 
