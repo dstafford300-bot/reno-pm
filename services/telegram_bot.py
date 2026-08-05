@@ -456,6 +456,38 @@ def send_cost_overrun_alert(
     return send_telegram_message(target_chat_id, message)
 
 
+def format_trade_lookahead_alert(
+    property_name: str,
+    unit_name: str,
+    task_name: str,
+    predicted_start: str,
+    hours_out: int,
+) -> str:
+    return (
+        f"📅 <b>Upcoming Task Look-Ahead ({hours_out}h)</b>\n\n"
+        f"🎩 A word of notice from <b>{html.escape(property_name)}</b>.\n\n"
+        f"🛠️ <b>{html.escape(unit_name)}: {html.escape(task_name)}</b> is "
+        f"expected to be ready to start around <b>{predicted_start}</b>, "
+        f"once the preceding work concludes.\n\n"
+        f"Kindly ensure the crew and materials are prepared."
+    )
+
+
+def send_trade_lookahead_alert(
+    property_name: str,
+    unit_name: str,
+    task_name: str,
+    predicted_start: str,
+    hours_out: int,
+    chat_id: str | None = None,
+) -> bool:
+    target_chat_id = chat_id or _get_default_chat_id()
+    message = format_trade_lookahead_alert(
+        property_name, unit_name, task_name, predicted_start, hours_out
+    )
+    return send_telegram_message(target_chat_id, message)
+
+
 def get_file_url(file_id: str) -> str | None:
     """Resolve a Telegram file_id (e.g. from a photo) to a downloadable
     URL. Returns None on any failure."""

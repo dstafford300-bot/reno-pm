@@ -34,6 +34,7 @@ from supabase import create_client
 from services.email_receipts import sync_email_receipts
 from services.journal_sync import sync_all_journals
 from services.pm_digest import send_daily_pm_digest
+from services.trade_nudges import check_and_send_trade_nudges
 
 
 def main():
@@ -64,6 +65,12 @@ def main():
     print(
         f"  Email: found {email_result['found']}, processed "
         f"{email_result['processed']}, {email_result['unassigned']} unassigned"
+    )
+
+    nudge_result = check_and_send_trade_nudges(client, properties)
+    print(
+        f"  Trade nudges: checked {nudge_result['checked']} task(s), "
+        f"sent {nudge_result['sent']}"
     )
 
     digest_sent = send_daily_pm_digest(client)

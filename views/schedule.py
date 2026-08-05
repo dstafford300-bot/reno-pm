@@ -16,6 +16,7 @@ from services.timeline_drafter import (
     refine_timeline_draft,
     tasks_to_markdown_table,
 )
+from services.trade_nudges import check_and_send_trade_nudges
 from utils.gantt_chart import prepare_gantt_dataframe, render_responsive_gantt_chart
 from utils.mobile import inject_mobile_button_css
 from utils.status import status_color
@@ -102,6 +103,21 @@ def render():
             "Reopen it from the Dashboard's Project Status section to make "
             "changes again."
         )
+
+    with st.expander("🔔 Trade Look-Ahead Nudges"):
+        st.caption(
+            "Runs automatically every night: warns a task's group chat "
+            "48 and 24 hours before it's predicted to be ready to start, "
+            "based on when its predecessor task(s) are estimated to "
+            "finish. Each task only gets nudged once per tier."
+        )
+        if st.button("Check Now", key="check_trade_nudges"):
+            with st.spinner("Checking upcoming tasks..."):
+                result = check_and_send_trade_nudges(supabase, properties)
+            st.success(
+                f"Checked {result['checked']} task(s) with dependencies, "
+                f"sent {result['sent']} nudge(s)."
+            )
 
     units = (
         supabase.table("units")
