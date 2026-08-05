@@ -4,10 +4,15 @@ alerts) summarizing schedule changes, draw releases, journal activity,
 and material purchases across every property.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from supabase import Client
 
+from services.db_writer import (
+    get_line_item_cost_variance,
+    get_milestone_task_progress,
+    milestone_is_eligible,
+)
 from services.telegram_bot import (
     PM_DIGEST_VERIFICATION_PHRASE,
     find_private_chat_by_phrase,
@@ -53,15 +58,89 @@ def link_pm_chat(client: Client) -> dict | None:
     return match
 
 
-def build_daily_digest(client: Client, hours: int = 24) -> list[dict]:
-    """Gathers the last `hours` of activity across every property into
-    [{"property_name": ..., "lines": [...]}], omitting properties with no
-    activity in the window.
+def build_action_items(client: Client, property_id: str) -> list[str]:
+    """Standing, always-relevant action items for one property — unlike
+    the rest of the digest, these aren't scoped to the last 24 hours, so
+    an overdue task or a draw that's been eligible for a week still shows
+    up every morning until it's actually dealt with.
 
-    Pulls from activity_log (the durable record written alongside each
-    existing per-property Telegram alert — see services/db_writer.py's
-    log_activity) plus journal_entries and material_logs directly, since
-    those two don't otherwise funnel through activity_log.
+    Three checks, all built on data/logic that already exists elsewhere
+    in the app rather than anything new:
+      - Draws whose linked tasks have all met their required completion
+        % (milestone_is_eligible) but haven't been released yet.
+      - Tasks past their estimated_end_date that aren't Completed.
+      - Tasks whose logged material spend exceeds budgeted_cost (negative
+        variance from get_line_item_cost_variance).
+    """
+    items: list[str] = []
+
+    try:
+        milestones = (
+            client.table("draw_milestones")
+            .select("id, milestone_name, draw_amount, status")
+            .eq("property_id", property_id)
+            .neq("status", "Released")
+            .execute()
+            .data
+        )
+        for m in milestones:
+            progress = get_milestone_task_progress(client, m["id"])
+            if milestone_is_eligible(progress):
+                items.append(
+                    f"💰 Draw ready to authorize: {m['milestone_name']} "
+                    f"(${m['draw_amount']:,.2f})"
+                )
+    except Exception:
+        pass  # draw-tracking migrations not run yet
+
+    try:
+        units = (
+            client.table("units").select("id").eq("property_id", property_id).execute().data
+        )
+        unit_ids = [u["id"] for u in units]
+        if unit_ids:
+            today = date.today().isoformat()
+            overdue = (
+                client.table("line_items")
+                .select("task_name, estimated_end_date, status")
+                .in_("unit_id", unit_ids)
+                .lt("estimated_end_date", today)
+                .neq("status", "Completed")
+                .execute()
+                .data
+            )
+            for task in overdue:
+                items.append(
+                    f"⚠️ Overdue: {task['task_name']} "
+                    f"(was due {task['estimated_end_date']})"
+                )
+    except Exception:
+        pass
+
+    try:
+        for row in get_line_item_cost_variance(client, property_id):
+            if row["variance"] < 0:
+                items.append(
+                    f"📈 Over budget: {row['unit_name']}: {row['task_name']} — "
+                    f"${abs(row['variance']):,.2f} over"
+                )
+    except Exception:
+        pass  # material_line_item migration not run yet
+
+    return items
+
+
+def build_daily_digest(client: Client, hours: int = 24) -> list[dict]:
+    """Gathers standing action items plus the last `hours` of activity
+    across every property into
+    [{"property_name": ..., "action_items": [...], "activity_lines": [...]}],
+    omitting properties with neither.
+
+    Pulls recent activity from activity_log (the durable record written
+    alongside each existing per-property Telegram alert — see
+    services/db_writer.py's log_activity) plus journal_entries and
+    material_logs directly, since those two don't otherwise funnel
+    through activity_log.
     """
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
@@ -120,10 +199,21 @@ def build_daily_digest(client: Client, hours: int = 24) -> list[dict]:
     for pid, total in material_totals.items():
         _add(pid, f"${total:,.2f} in material purchases logged")
 
+    action_items_by_property = {
+        pid: build_action_items(client, pid) for pid in property_names
+    }
+
+    all_property_ids = set(lines_by_property) | {
+        pid for pid, items in action_items_by_property.items() if items
+    }
+
     return [
-        {"property_name": property_names[pid], "lines": lines}
-        for pid, lines in lines_by_property.items()
-        if lines
+        {
+            "property_name": property_names[pid],
+            "action_items": action_items_by_property.get(pid, []),
+            "activity_lines": lines_by_property.get(pid, []),
+        }
+        for pid in all_property_ids
     ]
 
 

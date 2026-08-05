@@ -213,9 +213,12 @@ PM_DIGEST_VERIFICATION_PHRASE = "Jeeves PM Summary"
 
 
 def format_daily_digest_message(property_summaries: list[dict]) -> str:
-    """property_summaries: [{"property_name": ..., "lines": [str, ...]}]
-    for properties that had any activity — properties with none are
-    omitted entirely rather than shown as an empty section."""
+    """property_summaries: [{"property_name": ..., "action_items": [str, ...],
+    "activity_lines": [str, ...]}] for properties with either — properties
+    with neither are omitted entirely rather than shown as an empty
+    section. action_items (already-prefixed with their own icon, e.g.
+    "⚠️ Overdue: ...") render first under a dedicated heading so they
+    can't get lost among routine activity notes."""
     if not property_summaries:
         return (
             "🎩 <b>Good day, sir.</b> Jeeves here with your daily summary.\n\n"
@@ -224,8 +227,18 @@ def format_daily_digest_message(property_summaries: list[dict]) -> str:
 
     sections = []
     for prop in property_summaries:
-        lines = "\n".join(f"  • {html.escape(line)}" for line in prop["lines"])
-        sections.append(f"<b>{html.escape(prop['property_name'])}</b>\n{lines}")
+        block = [f"<b>{html.escape(prop['property_name'])}</b>"]
+        action_items = prop.get("action_items") or []
+        activity_lines = prop.get("activity_lines") or []
+        if action_items:
+            block.append("🚨 <b>Needs your attention:</b>")
+            block.extend(f"  • {html.escape(line)}" for line in action_items)
+        if activity_lines:
+            if action_items:
+                block.append("")
+            block.append("📋 <b>Last 24 hours:</b>")
+            block.extend(f"  • {html.escape(line)}" for line in activity_lines)
+        sections.append("\n".join(block))
 
     body = "\n\n".join(sections)
     return (
