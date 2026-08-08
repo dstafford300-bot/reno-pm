@@ -15,7 +15,7 @@ deprecation==2.1.0
 distro==1.9.0
 docstring_parser==0.18.0
 et_xmlfile==2.0.0
-fastapi==0.121.2
+fastapi
 gitdb==4.0.12
 GitPython==3.1.50
 h11==0.16.0
