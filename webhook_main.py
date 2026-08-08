@@ -53,17 +53,23 @@ def _get_supabase() -> Client:
 
 
 def _claim_update(supabase: Client, update_id: int) -> bool:
-    """True if this update hasn't been processed yet (and claims it) —
-    False if it's a Telegram retry of an update we've already handled.
-    Relies on processed_telegram_updates.update_id being a primary key;
-    the insert simply fails (harmlessly) on a duplicate."""
+    """True if this update should be processed (and claims it) — False
+    only when it's a genuine Telegram retry of an update we've already
+    handled (a primary-key conflict on update_id). Any OTHER failure
+    (e.g. the migration hasn't been run, a transient network error) fails
+    OPEN — returns True so the message still gets processed — since the
+    alternative is silently dropping every single incoming message,
+    which is far worse than occasionally double-processing a retry."""
     try:
         supabase.table("processed_telegram_updates").insert(
             {"update_id": update_id}
         ).execute()
         return True
-    except Exception:
-        return False
+    except Exception as e:
+        if "duplicate key" in str(e).lower() or "23505" in str(e):
+            return False
+        print(f"WARNING: could not record update {update_id} as processed: {e}")
+        return True
 
 
 def _handle_update(update: dict) -> None:
