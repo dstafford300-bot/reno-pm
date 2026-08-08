@@ -13,12 +13,7 @@ from services.db_writer import (
     get_milestone_task_progress,
     milestone_is_eligible,
 )
-from services.telegram_bot import (
-    PM_DIGEST_VERIFICATION_PHRASE,
-    find_private_chat_by_phrase,
-    format_daily_digest_message,
-    send_daily_digest,
-)
+from services.telegram_bot import format_daily_digest_message, send_daily_digest
 
 _PM_CHAT_KEY = "pm_digest_chat_id"
 
@@ -45,17 +40,6 @@ def set_pm_chat_id(client: Client, chat_id: str) -> None:
 
 def clear_pm_chat_id(client: Client) -> None:
     client.table("bot_state").delete().eq("key", _PM_CHAT_KEY).execute()
-
-
-def link_pm_chat(client: Client) -> dict | None:
-    """Checks recent Telegram updates for the PM verification phrase sent
-    in a private DM with the bot, and stores the resulting chat_id if
-    found. Returns the match dict, or None if the phrase hasn't been
-    seen."""
-    match = find_private_chat_by_phrase(PM_DIGEST_VERIFICATION_PHRASE)
-    if match:
-        set_pm_chat_id(client, match["chat_id"])
-    return match
 
 
 def build_action_items(client: Client, property_id: str) -> list[str]:

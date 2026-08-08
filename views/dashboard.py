@@ -12,18 +12,15 @@ from services.db_writer import (
     log_activity,
     publish_draft_timeline,
     set_property_archived,
-    set_property_telegram_chat_id,
     update_line_item_status,
 )
 from services.pm_digest import (
     clear_pm_chat_id,
     get_pm_chat_id,
-    link_pm_chat,
     send_daily_pm_digest,
 )
 from services.telegram_bot import (
     PM_DIGEST_VERIFICATION_PHRASE,
-    find_group_by_phrase,
     send_and_pin_portal_link,
     send_status_update_alert,
     send_timeline_published_alert,
@@ -250,20 +247,12 @@ def render():
         else:
             st.write(
                 "Open a direct message with Jeeves (not a group) and send "
-                "this exact phrase:"
+                "this exact phrase — it links automatically within a "
+                "couple of seconds:"
             )
             st.code(PM_DIGEST_VERIFICATION_PHRASE)
-            if st.button("Check for My Chat", key="link_pm_digest"):
-                match = link_pm_chat(supabase)
-                if match:
-                    st.success("Splendid! Jeeves will now DM you daily.")
-                    st.rerun()
-                else:
-                    st.warning(
-                        "No matching message found yet — make sure you "
-                        "messaged Jeeves directly with the exact phrase, "
-                        "then try again."
-                    )
+            if st.button("Refresh", key="link_pm_digest"):
+                st.rerun()
 
     property_names = [p["property_name"] for p in properties]
     selected_name = st.selectbox("Property", property_names)
@@ -350,33 +339,12 @@ def render():
         phrase = verification_phrase(selected_name)
         st.write(
             "Add Jeeves to your new Telegram group, then send this exact "
-            "message in the group:"
+            "message in the group — it links automatically within a "
+            "couple of seconds:"
         )
         st.code(phrase)
-        if st.button("Check for Group Link", key="sync_telegram_group"):
-            match = find_group_by_phrase(phrase)
-            if match:
-                try:
-                    set_property_telegram_chat_id(
-                        supabase, property_id, match["chat_id"]
-                    )
-                except Exception:
-                    st.error(
-                        "Found the group, but properties.telegram_chat_id "
-                        "doesn't exist in the database yet — run the "
-                        "migration first, then try again."
-                    )
-                else:
-                    st.success(
-                        "Splendid! Jeeves has successfully linked to this "
-                        "group chat."
-                    )
-                    st.rerun()
-            else:
-                st.warning(
-                    "No matching message found yet — make sure you've added "
-                    "Jeeves and sent the exact phrase, then try again."
-                )
+        if st.button("Refresh", key="sync_telegram_group"):
+            st.rerun()
 
     units = (
         supabase.table("units")

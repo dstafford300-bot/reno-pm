@@ -252,78 +252,40 @@ def send_daily_digest(text: str, chat_id: str) -> bool:
     return send_telegram_message(chat_id, text)
 
 
-def get_updates(limit: int = 100, offset: int | None = None) -> list[dict]:
-    """Fetch updates Jeeves has received (messages, group-add events, etc).
-
-    Telegram only keeps ~100 *unconfirmed* updates bot-wide (across every
-    chat the bot is in) before older ones start falling off — and a call
-    with no `offset` never confirms anything, so a busy bot gets stuck
-    re-seeing the same oldest batch forever and can never reach anything
-    newer. Passing `offset` (one past the highest update_id you've already
-    processed) is what advances that window. Callers that just want a
-    quick, side-effect-free peek (e.g. group-link verification) can still
-    omit it — see services/journal_sync.py for the caller that persists
-    and advances a real offset. Returns [] on any failure (missing token,
-    network error) rather than raising.
-    """
+def set_webhook(url: str, secret_token: str | None = None) -> bool:
+    """Registers `url` as this bot's webhook — Telegram will POST every
+    new update there instead of waiting for getUpdates() polls. Note:
+    once a webhook is set, getUpdates() stops returning anything (a
+    Telegram platform rule, not a bug here) — see webhook_main.py's
+    module docstring for what moved as a result."""
     token = _get_bot_token()
     if not token:
-        return []
-
-    params = {"limit": limit}
-    if offset is not None:
-        params["offset"] = offset
-
+        return False
+    payload = {"url": url}
+    if secret_token:
+        payload["secret_token"] = secret_token
     try:
-        response = requests.get(
-            f"{TELEGRAM_API_BASE}/bot{token}/getUpdates",
-            params=params,
-            timeout=10,
+        response = requests.post(
+            f"{TELEGRAM_API_BASE}/bot{token}/setWebhook", json=payload, timeout=10
         )
-        if not response.ok:
-            return []
-        return response.json().get("result", [])
+        return response.ok and response.json().get("ok", False)
     except requests.RequestException:
-        return []
+        return False
 
 
-def _find_chat_by_phrase(phrase: str, allowed_types: tuple[str, ...]) -> dict | None:
-    matches = []
-    for update in get_updates():
-        message = update.get("message") or update.get("channel_post")
-        if not message:
-            continue
-        chat = message.get("chat", {})
-        if chat.get("type") not in allowed_types:
-            continue
-        text = message.get("text") or ""
-        if phrase.strip().lower() in text.strip().lower():
-            matches.append(
-                {
-                    "chat_id": chat.get("id"),
-                    "chat_title": chat.get("title"),
-                    "date": message.get("date", 0),
-                }
-            )
-
-    if not matches:
-        return None
-    matches.sort(key=lambda m: m["date"])
-    return matches[-1]
-
-
-def find_group_by_phrase(phrase: str) -> dict | None:
-    """Scan recent updates for a group/supergroup message containing
-    `phrase` (case-insensitive). Returns the most recent match as
-    {"chat_id": ..., "chat_title": ...}, or None if nothing matches."""
-    return _find_chat_by_phrase(phrase, ("group", "supergroup"))
-
-
-def find_private_chat_by_phrase(phrase: str) -> dict | None:
-    """Same as find_group_by_phrase, but for a 1-on-1 DM with the bot
-    (chat type "private") rather than a group — used to link the PM's
-    personal chat for the cross-property daily digest."""
-    return _find_chat_by_phrase(phrase, ("private",))
+def delete_webhook() -> bool:
+    """Reverts to polling mode (getUpdates) — mainly useful for local
+    development or rolling back the webhook migration."""
+    token = _get_bot_token()
+    if not token:
+        return False
+    try:
+        response = requests.post(
+            f"{TELEGRAM_API_BASE}/bot{token}/deleteWebhook", timeout=10
+        )
+        return response.ok and response.json().get("ok", False)
+    except requests.RequestException:
+        return False
 
 
 def format_timeline_published_alert(
@@ -527,18 +489,13 @@ def download_file_bytes(file_id: str) -> bytes | None:
 
 
 def extract_chat_messages(updates: list[dict], chat_id: str) -> list[dict]:
-    """Shapes already-fetched raw Telegram updates belonging to `chat_id`
-    into journal_entries-ready dicts (property_id/linked_line_item_id are
-    added by the caller, which knows which property this chat belongs
-    to). Pure — no network calls, no offset handling; see
-    services/journal_sync.py for the fetch-once-and-distribute caller
-    that gets `updates` from get_updates() and advances the offset
-    (necessary since Telegram's offset is bot-wide, not per-chat — this
-    function has to work from an already-fetched shared batch rather than
-    calling get_updates() itself, or syncing one chat could silently
-    consume updates another chat hasn't processed yet). Each entry carries
-    enough identity (telegram_chat_id + telegram_message_id) to upsert
-    without duplicating across repeated syncs.
+    """Shapes raw Telegram updates belonging to `chat_id` into
+    journal_entries-ready dicts (property_id/linked_line_item_id are added
+    by the caller, which knows which property this chat belongs to). Pure
+    — no network calls. See webhook_main.py, which calls this per incoming
+    webhook update (a single-update list) rather than a batch. Each entry
+    carries enough identity (telegram_chat_id + telegram_message_id) to
+    upsert without duplicating.
     """
     chat_id_str = str(chat_id)
     entries = []

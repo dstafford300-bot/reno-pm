@@ -5,7 +5,6 @@ import streamlit as st
 
 from db.connection import get_supabase_client
 from services.db_writer import link_journal_entry_to_line_item
-from services.journal_sync import sync_property_journal
 from services.telegram_bot import get_file_url
 
 
@@ -59,23 +58,10 @@ def render():
         )
         return
 
-    if st.button("🔄 Sync Journal from Telegram", disabled=is_archived):
-        with st.spinner("Fetching messages and asking Jeeves to filter..."):
-            try:
-                result = sync_property_journal(supabase, property_id, chat_id)
-            except Exception as e:
-                st.error(
-                    "Sync failed — make sure the required migrations have "
-                    "been run (scripts/migration_draw_and_journal.sql and "
-                    "scripts/migration_material_logs.sql via Supabase's SQL "
-                    f"Editor). Error: {e}"
-                )
-                return
-        st.success(
-            f"Saw {result['seen']} message(s), kept {result['kept']} in the "
-            f"journal, logged {result['receipts']} receipt(s)."
-        )
-        st.rerun()
+    st.caption(
+        "✅ Journal entries and receipts sync automatically in real time "
+        "now — no manual sync needed."
+    )
 
     units = (
         supabase.table("units")
