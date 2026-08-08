@@ -86,7 +86,14 @@ EXTRACT_MATERIAL_TOOL = {
                 "type": ["string", "null"],
                 "description": (
                     "Color/finish/size details visible on the label, e.g. "
-                    "'Agreeable Gray, Eggshell, 1 Gallon'."
+                    "'Agreeable Gray, Eggshell, 1 Gallon'. If this is a "
+                    "CUSTOM/STORE-MATCHED color (a mixing ticket rather than "
+                    "a standard catalog color name), a name like 'Custom "
+                    "Color Match' alone is USELESS for reproducing it — put "
+                    "the base paint name/number here, and put the complete "
+                    "colorant tint formula (every colorant code with its "
+                    "exact amount, transcribed as precisely as you can read "
+                    "it) in `notes`."
                 ),
             },
             "model_sku_barcode": {
@@ -106,7 +113,16 @@ EXTRACT_MATERIAL_TOOL = {
                 "type": ["string", "null"],
                 "description": (
                     "Any extra detail from the sender's message that didn't "
-                    "map into the other fields."
+                    "map into the other fields. For a custom color match, "
+                    "this MUST include the full tint formula table — every "
+                    "colorant line, transcribed exactly as printed (code + "
+                    "amount). If any part of that formula is too small/"
+                    "blurry to read with confidence, say so explicitly "
+                    "(e.g. 'formula partly illegible in photo — colorant "
+                    "amounts unclear') rather than silently omitting or "
+                    "guessing at digits — a wrong tint number is worse than "
+                    "an honest gap, since it would reproduce the wrong "
+                    "color with false confidence."
                 ),
             },
         },
@@ -122,6 +138,13 @@ Read the label photo carefully for brand, item description, color/finish/size, \
 and any model/SKU/barcode number. Read the message text for the property address, \
 room/location, and category — infer the category from the item itself if the \
 message doesn't state one.
+
+If the label is a paint store mixing ticket (a custom/computer-matched color, \
+not a standard catalog name), the tint formula printed on it is the ONLY way \
+to reproduce that exact color again — read it as carefully as you can and \
+transcribe the base name plus every colorant code and amount into the notes \
+field, per its description. Flag anything illegible rather than guessing at a \
+digit.
 
 Call the record_material tool with the result. Do not include any commentary \
 outside of the tool call."""
