@@ -127,6 +127,17 @@ Call the record_material tool with the result. Do not include any commentary \
 outside of the tool call."""
 
 
+TEXT_ONLY_SYSTEM_PROMPT = """You are Jeeves, extracting a legacy building material \
+record from a text message alone (no photo was attached) — the sender typed the \
+label/product details themselves rather than photographing them.
+
+Read the message for the property address, room/location, category, brand, item \
+description, color/finish/size, and any model/SKU/barcode number.
+
+Call the record_material tool with the result. Do not include any commentary \
+outside of the tool call."""
+
+
 def extract_material_fields(image_bytes: bytes, caption_text: str) -> dict:
     client = _anthropic_client()
     image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
@@ -160,20 +171,40 @@ def extract_material_fields(image_bytes: bytes, caption_text: str) -> dict:
     return tool_use.input
 
 
+def extract_material_fields_from_text(caption_text: str) -> dict:
+    client = _anthropic_client()
+    message = client.messages.create(
+        model=_model(),
+        max_tokens=1024,
+        system=TEXT_ONLY_SYSTEM_PROMPT,
+        tools=[EXTRACT_MATERIAL_TOOL],
+        tool_choice={"type": "tool", "name": "record_material"},
+        messages=[{"role": "user", "content": caption_text}],
+    )
+    tool_use = next(block for block in message.content if block.type == "tool_use")
+    return tool_use.input
+
+
 def log_material_from_message(
-    image_bytes: bytes, caption_text: str, photo_public_url: str
+    caption_text: str,
+    image_bytes: bytes | None = None,
+    photo_public_url: str | None = None,
 ) -> dict:
-    """Extracts fields, writes the Airtable record, and returns
+    """Extracts fields (via Vision if a photo was sent, text-only
+    otherwise), writes the Airtable record, and returns
     {"success": bool, "confirmation_text": str}. Never raises — callers
     are Telegram webhook handlers that should always be able to reply
     with *something*, even on failure."""
     try:
-        parsed = extract_material_fields(image_bytes, caption_text)
+        if image_bytes is not None:
+            parsed = extract_material_fields(image_bytes, caption_text)
+        else:
+            parsed = extract_material_fields_from_text(caption_text)
     except Exception as e:
         return {
             "success": False,
             "confirmation_text": (
-                f"🎩 I regret I couldn't read that label, sir — "
+                f"🎩 I regret I couldn't make sense of that, sir — "
                 f"{html.escape(str(e))}"
             ),
         }
@@ -186,10 +217,11 @@ def log_material_from_message(
         "Item Name & Description": parsed.get("item_name_description"),
         "Color / Finish / Size": parsed.get("color_finish_size"),
         "Model / SKU / Barcode": parsed.get("model_sku_barcode"),
-        "Photo": [{"url": photo_public_url}],
         "Project Type": parsed.get("project_type") or DEFAULT_PROJECT_TYPE,
         "Notes": parsed.get("notes"),
     }
+    if photo_public_url:
+        fields["Photo"] = [{"url": photo_public_url}]
     fields = {k: v for k, v in fields.items() if v not in (None, "")}
 
     record = create_material_record(fields)

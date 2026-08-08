@@ -98,17 +98,23 @@ def _handle_update(update: dict) -> None:
         .data
     )
 
-    # 1. Legacy materials log photo.
-    if photo_file_id and text_lower.startswith(LEGACY_TRIGGER):
-        image_bytes = download_file_bytes(photo_file_id)
-        if image_bytes is None:
-            send_telegram_message(
-                chat_id, "🎩 I regret I couldn't download that photo, sir."
-            )
-            return
+    # 1. Legacy materials log — "jeeves legacy" prefix, photo optional
+    # (a typed-out label works just as well as a photographed one).
+    if text_lower.startswith(LEGACY_TRIGGER):
         caption = text[len(LEGACY_TRIGGER):].lstrip(" -:—").strip()
-        photo_url = upload_legacy_material_photo(supabase, image_bytes)
-        result = log_material_from_message(image_bytes, caption, photo_url)
+        image_bytes = None
+        photo_url = None
+        if photo_file_id:
+            image_bytes = download_file_bytes(photo_file_id)
+            if image_bytes is None:
+                send_telegram_message(
+                    chat_id, "🎩 I regret I couldn't download that photo, sir."
+                )
+                return
+            photo_url = upload_legacy_material_photo(supabase, image_bytes)
+        result = log_material_from_message(
+            caption, image_bytes=image_bytes, photo_public_url=photo_url
+        )
         send_telegram_message(chat_id, result["confirmation_text"])
         return
 
