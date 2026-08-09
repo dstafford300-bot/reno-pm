@@ -177,7 +177,7 @@ def _handle_matty_update(update: dict) -> None:
 
     if intent == "lookup":
         send_telegram_message(
-            chat_id, answer_lookup_question(text), bot_token=matty_token
+            chat_id, answer_lookup_question(text, supabase=supabase), bot_token=matty_token
         )
         return
 

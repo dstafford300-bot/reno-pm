@@ -385,6 +385,16 @@ LOOKUP_QUERY_TOOL = {
                     "e.g. 'kitchen', 'upstairs bath'."
                 ),
             },
+            "item_keyword": {
+                "type": ["string", "null"],
+                "description": (
+                    "A short word describing what kind of item the "
+                    "question is about, e.g. 'tile', 'paint', 'faucet' — "
+                    "used to also search purchase receipts logged through "
+                    "the PM software, which don't have a structured "
+                    "category field like the legacy log does."
+                ),
+            },
         },
         "required": ["address_query"],
     },
@@ -412,6 +422,92 @@ def _extract_lookup_query(question_text: str) -> dict:
     return tool_use.input
 
 
+def search_purchase_receipts(
+    supabase, address_query: str | None, item_keyword: str | None = None,
+    max_records: int = 10,
+) -> list[dict]:
+    """Read-only search of the Reno PM app's own Material Logs (Supabase
+    `material_logs`, purchase receipts tied to a property) — a second,
+    separate source of "what did we use here" alongside Matty's own
+    Airtable log, covering purchases logged through the app (Telegram
+    receipt photos, email scanning, manual entry) that were never
+    explicitly told to Matty. Matty only ever reads this table, never
+    writes to it — receipt logging stays owned by Jeeves/the app.
+
+    Returns [{"property_name", "store", "purchase_date", "items"}, ...].
+    Never raises — returns [] on any failure (e.g. no properties table
+    match, migration not run) so a receipt-search failure doesn't break
+    the Airtable side of the answer.
+    """
+    if not address_query or supabase is None:
+        return []
+    try:
+        properties = (
+            supabase.table("properties")
+            .select("id, property_name")
+            .ilike("property_name", f"%{address_query}%")
+            .execute()
+            .data
+        )
+        if not properties:
+            return []
+        property_name_by_id = {p["id"]: p["property_name"] for p in properties}
+
+        logs = (
+            supabase.table("material_logs")
+            .select("property_id, store, amount, purchase_date, receipt_details, line_items_json")
+            .in_("property_id", list(property_name_by_id.keys()))
+            .order("purchase_date", desc=True)
+            .limit(50)
+            .execute()
+            .data
+        )
+    except Exception:
+        return []
+
+    keyword = (item_keyword or "").lower().strip()
+    results = []
+    for log in logs:
+        items = log.get("line_items_json") or []
+        if keyword:
+            matched_items = [
+                item
+                for item in items
+                if keyword in (item.get("description") or "").lower()
+            ]
+            if not matched_items and keyword not in (log.get("receipt_details") or "").lower():
+                continue
+            items = matched_items or items
+        results.append(
+            {
+                "property_name": property_name_by_id.get(log["property_id"]),
+                "store": log.get("store"),
+                "purchase_date": log.get("purchase_date"),
+                "items": items,
+            }
+        )
+        if len(results) >= max_records:
+            break
+    return results
+
+
+def _format_receipt_match(match: dict) -> str:
+    parts = [f"<b>{html.escape(match.get('store') or 'Unknown store')}</b>"]
+    if match.get("purchase_date"):
+        parts.append(html.escape(str(match["purchase_date"])))
+    line = " — ".join(parts)
+    item_descs = [
+        html.escape(item["description"])
+        for item in (match.get("items") or [])
+        if item.get("description")
+    ]
+    if item_descs:
+        line += ": " + ", ".join(item_descs)
+    if match.get("property_name"):
+        line += f" ({html.escape(match['property_name'])})"
+    return line
+
+
 def _format_record(fields: dict) -> str:
     parts = []
     if fields.get("Brand / Manufacturer"):
@@ -431,9 +527,11 @@ def _format_record(fields: dict) -> str:
     return line
 
 
-def answer_lookup_question(question_text: str) -> str:
-    """Parses the question, searches Airtable, and returns a Telegram-
-    ready HTML reply. Never raises."""
+def answer_lookup_question(question_text: str, supabase=None) -> str:
+    """Parses the question, searches Matty's own Airtable log AND (if a
+    supabase client is given) the Reno PM app's Material Logs purchase
+    receipts, and returns a combined Telegram-ready HTML reply. Never
+    raises."""
     try:
         query = _extract_lookup_query(question_text)
     except Exception as e:
@@ -444,11 +542,23 @@ def answer_lookup_question(question_text: str) -> str:
         category=query.get("category"),
         location=query.get("location"),
     )
-    if not records:
-        return "I've no record of that in the materials log — perhaps it hasn't been logged yet."
+    receipt_matches = search_purchase_receipts(
+        supabase,
+        address_query=query.get("address_query"),
+        item_keyword=query.get("item_keyword"),
+    )
 
-    lines = [_format_record(r.get("fields", {})) for r in records]
-    if len(lines) == 1:
-        return f"Found it: {lines[0]}"
-    body = "\n".join(f"  • {line}" for line in lines)
-    return f"Found {len(lines)} matching entries:\n{body}"
+    if not records and not receipt_matches:
+        return "I've no record of that anywhere — perhaps it hasn't been logged yet."
+
+    sections = []
+    if records:
+        lines = [_format_record(r.get("fields", {})) for r in records]
+        body = "\n".join(f"  • {line}" for line in lines)
+        sections.append(f"📋 From the materials log:\n{body}")
+    if receipt_matches:
+        lines = [_format_receipt_match(m) for m in receipt_matches]
+        body = "\n".join(f"  • {line}" for line in lines)
+        sections.append(f"🧾 From purchase receipts:\n{body}")
+
+    return "\n\n".join(sections)
