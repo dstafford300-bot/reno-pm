@@ -1,9 +1,9 @@
-"""Legacy building materials log: send Jeeves a photo of a material label
-(paint can, tile box, plumbing part) with a caption starting with the
-LEGACY_TRIGGER phrase, and it gets OCR'd/parsed via Claude Vision and
-written to the "Legacy Materials Log" Airtable base. Also handles plain-
-English lookup questions ("Jeeves, what paint color did we use at Lincoln
-Heights?") against the same base.
+"""Matty: a dedicated Telegram bot for the legacy building materials log —
+separate from Jeeves so no trigger phrase is needed. Every message Matty
+receives is material-related by definition (it's a single-purpose bot), so
+each one is classified as either a LOG request (a new material, via photo
+and/or text) or a LOOKUP question (about something already logged), then
+handled accordingly against the "Legacy Materials Log" Airtable base.
 
 Deliberately not using Streamlit (utils.anthropic_client/utils.settings)
 — this module runs inside the standalone webhook process (webhook_main.py),
@@ -18,8 +18,6 @@ import os
 from anthropic import Anthropic
 
 from services.airtable_client import create_material_record, search_material_records
-
-LEGACY_TRIGGER = "jeeves legacy"
 
 CATEGORY_CHOICES = [
     "Paint",
@@ -40,6 +38,69 @@ def _anthropic_client() -> Anthropic:
 
 def _model() -> str:
     return os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5"
+
+
+CLASSIFY_INTENT_TOOL = {
+    "name": "classify_intent",
+    "description": (
+        "Decide whether a message to Matty (a materials-log assistant) is "
+        "a request to log a new material, or a question looking up "
+        "something already logged."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": ["log", "lookup"],
+                "description": (
+                    "'log' for a new material to record (a photo of a "
+                    "label and/or text describing something purchased/"
+                    "installed). 'lookup' for a question about materials "
+                    "already logged."
+                ),
+            }
+        },
+        "required": ["intent"],
+    },
+}
+
+CLASSIFY_SYSTEM_PROMPT = """You are Matty, an assistant that exclusively handles a \
+legacy building-materials log — nothing else. Every message you receive is one of \
+exactly two things:
+
+1. LOG — a request to record a new material: a photo of a product label, and/or \
+text describing a property address, what the item is, brand, color, SKU, etc. \
+A message with a photo attached is almost always a log request.
+
+2. LOOKUP — a question about something already logged, e.g. "what paint did we \
+use at 123 Main St", "do we have the SKU for the tile at Lincoln Heights", "what \
+flooring is in the upstairs bath at Probasco". Phrased as a question — what/which/\
+do we have/did we use, or ending in "?" — even without a photo.
+
+Call classify_intent with your decision."""
+
+
+def classify_intent(text: str, has_photo: bool) -> str:
+    client = _anthropic_client()
+    message = client.messages.create(
+        model=_model(),
+        max_tokens=64,
+        system=CLASSIFY_SYSTEM_PROMPT,
+        tools=[CLASSIFY_INTENT_TOOL],
+        tool_choice={"type": "tool", "name": "classify_intent"},
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Has photo attached: {has_photo}\n"
+                    f"Message text: {text or '(none)'}"
+                ),
+            }
+        ],
+    )
+    tool_use = next(block for block in message.content if block.type == "tool_use")
+    return tool_use.input.get("intent", "log")
 
 
 EXTRACT_MATERIAL_TOOL = {
@@ -130,7 +191,7 @@ EXTRACT_MATERIAL_TOOL = {
     },
 }
 
-EXTRACT_SYSTEM_PROMPT = """You are Jeeves, extracting a legacy building material \
+EXTRACT_SYSTEM_PROMPT = """You are Matty, extracting a legacy building material \
 record from a photo of a product label (paint can, tile box, plumbing part, etc.) \
 and a short accompanying message from the property manager.
 
@@ -150,7 +211,7 @@ Call the record_material tool with the result. Do not include any commentary \
 outside of the tool call."""
 
 
-TEXT_ONLY_SYSTEM_PROMPT = """You are Jeeves, extracting a legacy building material \
+TEXT_ONLY_SYSTEM_PROMPT = """You are Matty, extracting a legacy building material \
 record from a text message alone (no photo was attached) — the sender typed the \
 label/product details themselves rather than photographing them.
 
@@ -208,6 +269,22 @@ def extract_material_fields_from_text(caption_text: str) -> dict:
     return tool_use.input
 
 
+def _is_sufficient(parsed: dict) -> bool:
+    """A record is only worth writing if we know WHERE (an address) and
+    WHAT (some description of the item) — otherwise every required field
+    Claude was forced to fill gets a meaningless placeholder (seen in
+    practice: "<UNKNOWN>" for location_in_house when a question got
+    mis-routed here). Better to ask the sender to clarify than write a
+    near-empty record to Airtable."""
+    address = (parsed.get("property_address") or "").strip()
+    what = (
+        parsed.get("item_name_description")
+        or parsed.get("brand_manufacturer")
+        or parsed.get("model_sku_barcode")
+    )
+    return bool(address) and bool(what)
+
+
 def log_material_from_message(
     caption_text: str,
     image_bytes: bytes | None = None,
@@ -227,8 +304,17 @@ def log_material_from_message(
         return {
             "success": False,
             "confirmation_text": (
-                f"🎩 I regret I couldn't make sense of that, sir — "
-                f"{html.escape(str(e))}"
+                f"I couldn't make sense of that, sorry — {html.escape(str(e))}"
+            ),
+        }
+
+    if not _is_sufficient(parsed):
+        return {
+            "success": False,
+            "confirmation_text": (
+                "I'm not confident I caught enough detail to log this "
+                "properly — could you confirm the property address and "
+                "what the item is?"
             ),
         }
 
@@ -252,8 +338,8 @@ def log_material_from_message(
         return {
             "success": False,
             "confirmation_text": (
-                "🎩 I read the label but couldn't reach the materials log, "
-                "sir — please check the Airtable connection."
+                "I read that but couldn't reach the materials log — "
+                "please check the Airtable connection."
             ),
         }
 
@@ -266,8 +352,7 @@ def log_material_from_message(
     return {
         "success": True,
         "confirmation_text": (
-            f"🎩 Logged, sir: {html.escape(what)} under "
-            f"{html.escape(location_label)}."
+            f"✅ Logged: {html.escape(what)} under {html.escape(location_label)}."
         ),
     }
 
@@ -305,16 +390,12 @@ LOOKUP_QUERY_TOOL = {
     },
 }
 
-LOOKUP_SYSTEM_PROMPT = """You are Jeeves, parsing a plain-English question about \
+LOOKUP_SYSTEM_PROMPT = """You are Matty, parsing a plain-English question about \
 previously logged building materials (e.g. "what paint color did we use at \
 Lincoln Heights?") into search parameters.
 
 Call the record_lookup_query tool with the result. Do not include any \
 commentary outside of the tool call."""
-
-
-def is_lookup_question(text: str) -> bool:
-    return (text or "").strip().lower().startswith("jeeves")
 
 
 def _extract_lookup_query(question_text: str) -> dict:
@@ -356,7 +437,7 @@ def answer_lookup_question(question_text: str) -> str:
     try:
         query = _extract_lookup_query(question_text)
     except Exception as e:
-        return f"🎩 I couldn't quite parse that, sir — {html.escape(str(e))}"
+        return f"I couldn't quite parse that — {html.escape(str(e))}"
 
     records = search_material_records(
         address_query=query.get("address_query"),
@@ -364,13 +445,10 @@ def answer_lookup_question(question_text: str) -> str:
         location=query.get("location"),
     )
     if not records:
-        return (
-            "🎩 I've no record of that in the materials log, sir — "
-            "perhaps it hasn't been logged yet."
-        )
+        return "I've no record of that in the materials log — perhaps it hasn't been logged yet."
 
     lines = [_format_record(r.get("fields", {})) for r in records]
     if len(lines) == 1:
-        return f"🎩 Indeed, sir: {lines[0]}"
+        return f"Found it: {lines[0]}"
     body = "\n".join(f"  • {line}" for line in lines)
-    return f"🎩 I found {len(lines)} matching entries, sir:\n{body}"
+    return f"Found {len(lines)} matching entries:\n{body}"

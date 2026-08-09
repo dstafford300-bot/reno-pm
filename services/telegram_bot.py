@@ -91,15 +91,21 @@ def format_status_alert(
     )
 
 
-def send_telegram_message(chat_id: str | None, text: str) -> bool:
+def send_telegram_message(
+    chat_id: str | None, text: str, bot_token: str | None = None
+) -> bool:
     """Send a message via the Telegram Bot API.
+
+    `bot_token` defaults to Jeeves' own token — pass a different bot's
+    token (e.g. Matty's) to send as that bot instead, since a Telegram
+    message must be sent via the same bot the chat is talking to.
 
     Returns True on success, False on any failure — missing token, missing
     chat_id, network error, or a non-2xx response from Telegram. Never
     raises, so callers (including background threads) can fire this without
     risking the app crashing on a bad/missing config.
     """
-    token = _get_bot_token()
+    token = bot_token or _get_bot_token()
     if not token or not chat_id:
         return False
 
@@ -252,13 +258,17 @@ def send_daily_digest(text: str, chat_id: str) -> bool:
     return send_telegram_message(chat_id, text)
 
 
-def set_webhook(url: str, secret_token: str | None = None) -> bool:
+def set_webhook(
+    url: str, secret_token: str | None = None, bot_token: str | None = None
+) -> bool:
     """Registers `url` as this bot's webhook — Telegram will POST every
-    new update there instead of waiting for getUpdates() polls. Note:
-    once a webhook is set, getUpdates() stops returning anything (a
-    Telegram platform rule, not a bug here) — see webhook_main.py's
-    module docstring for what moved as a result."""
-    token = _get_bot_token()
+    new update there instead of waiting for getUpdates() polls. `bot_token`
+    defaults to Jeeves' own token; pass a different bot's token (e.g.
+    Matty's) to register that bot's webhook instead. Note: once a webhook
+    is set, getUpdates() stops returning anything for that bot (a Telegram
+    platform rule, not a bug here) — see webhook_main.py's module
+    docstring for what moved as a result."""
+    token = bot_token or _get_bot_token()
     if not token:
         return False
     payload = {"url": url}
@@ -273,10 +283,10 @@ def set_webhook(url: str, secret_token: str | None = None) -> bool:
         return False
 
 
-def delete_webhook() -> bool:
+def delete_webhook(bot_token: str | None = None) -> bool:
     """Reverts to polling mode (getUpdates) — mainly useful for local
     development or rolling back the webhook migration."""
-    token = _get_bot_token()
+    token = bot_token or _get_bot_token()
     if not token:
         return False
     try:
@@ -450,10 +460,13 @@ def send_trade_lookahead_alert(
     return send_telegram_message(target_chat_id, message)
 
 
-def get_file_url(file_id: str) -> str | None:
+def get_file_url(file_id: str, bot_token: str | None = None) -> str | None:
     """Resolve a Telegram file_id (e.g. from a photo) to a downloadable
-    URL. Returns None on any failure."""
-    token = _get_bot_token()
+    URL. `bot_token` defaults to Jeeves' own token — a file_id is only
+    resolvable via the same bot that received it, so pass a different
+    bot's token (e.g. Matty's) for a file that bot received. Returns None
+    on any failure."""
+    token = bot_token or _get_bot_token()
     if not token:
         return None
     try:
@@ -472,11 +485,11 @@ def get_file_url(file_id: str) -> str | None:
         return None
 
 
-def download_file_bytes(file_id: str) -> bytes | None:
+def download_file_bytes(file_id: str, bot_token: str | None = None) -> bytes | None:
     """Download the actual bytes of a Telegram file (e.g. a photo), for
     re-hosting elsewhere (Supabase Storage) rather than depending on
     Telegram's own temporary file URLs. Returns None on any failure."""
-    url = get_file_url(file_id)
+    url = get_file_url(file_id, bot_token=bot_token)
     if not url:
         return None
     try:
