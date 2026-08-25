@@ -1,3 +1,4 @@
+import base64
 from datetime import date
 
 from utils.anthropic_client import get_anthropic_client, get_model
@@ -99,6 +100,82 @@ within the same unit.
 
 Call the record_sow_data tool with the complete structured result. Do not include \
 any commentary outside of the tool call."""
+
+
+PDF_SYSTEM_PROMPT = """You are a construction project management assistant. You will \
+be given a signed-off scope-of-work (SOW) document from a contractor, as a PDF — a \
+formatted document (possibly with a letterhead, signature block, terms/conditions \
+pages, or other content around the actual scope), not a raw spreadsheet.
+
+Read the document and ignore anything that isn't part of the actual scope of work \
+(letterhead, signatures, boilerplate terms, page numbers). The layout is NOT \
+standardized — properties, sub-units, and line items may appear as tables, numbered \
+lists, or narrative sections. Analyze the layout dynamically rather than assuming a \
+fixed schema. Your job:
+
+1. Identify each distinct PROPERTY (a separate building/address), for example \
+"809 Fred Shuttlesworth" and "811 Fred Shuttlesworth" are two different properties, \
+even if they appear in the same document or share a street name.
+2. Within each property, identify its UNITS (sub-projects — e.g. "Unit A", \
+"Basement", "Exterior", "Whole House" if there is no further breakdown).
+3. Within each unit, extract every individual LINE ITEM task with its budgeted cost. \
+Assign each a cost_group using standard residential renovation trade categories \
+(Demo, Framing, Plumbing, Electrical, HVAC, Drywall, Flooring, Paint, Fixtures, \
+Cleanup, etc.) based on the task description.
+4. Infer start_date and estimated_end_date for every line item by sequencing tasks \
+in standard construction order of operations — permits and demo first, then \
+structural/framing, then rough-in trades (plumbing/electrical/HVAC), then drywall, \
+then finishes (flooring, paint, fixtures), then punch list/cleanup last. Assume the \
+project starts on {today} unless the document states otherwise, and give each task \
+a realistic duration in days for its scope, sequencing dependent trades back-to-back \
+within the same unit.
+
+Call the record_sow_data tool with the complete structured result. Do not include \
+any commentary outside of the tool call."""
+
+
+def parse_sow_from_pdf(pdf_bytes: bytes) -> dict:
+    """Send a signed SOW PDF directly to Claude (native PDF/document
+    support) and return the same structured
+    {properties: [{units: [{line_items: [...]}]}]} payload as parse_sow.
+    Reading the PDF natively (rather than extracting text with a separate
+    library first) handles tables and layout far more reliably than
+    text-extraction libraries typically manage."""
+    client = get_anthropic_client()
+    model = get_model()
+    pdf_b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
+
+    message = client.messages.create(
+        model=model,
+        max_tokens=8000,
+        system=PDF_SYSTEM_PROMPT.format(today=date.today().isoformat()),
+        tools=[SOW_TOOL],
+        tool_choice={"type": "tool", "name": "record_sow_data"},
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": "Extract the scope-of-work data from this signed SOW document.",
+                    },
+                ],
+            }
+        ],
+    )
+
+    tool_use = next(
+        block for block in message.content if block.type == "tool_use"
+    )
+    return tool_use.input
 
 
 def parse_sow(raw_text: str) -> dict:

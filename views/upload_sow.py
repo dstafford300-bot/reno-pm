@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from db.connection import get_supabase_client
-from services.claude_parser import parse_sow
+from services.claude_parser import parse_sow, parse_sow_from_pdf
 from services.db_writer import save_parsed_sow
 
 MAX_ROWS_PER_SHEET = 500
@@ -36,13 +36,14 @@ def _extract_raw_text(uploaded_file) -> str:
 def render():
     st.title("Upload SOW")
     st.caption(
-        "Upload a raw scope-of-work spreadsheet. Claude identifies the "
-        "properties, units, and line items, then populates the database "
-        "automatically."
+        "Upload a raw scope-of-work spreadsheet, or a signed SOW PDF from "
+        "a contractor. Claude identifies the properties, units, and line "
+        "items, then populates the database automatically."
     )
 
     uploaded_file = st.file_uploader(
-        "Excel or CSV Scope of Work", type=["xlsx", "xls", "csv"]
+        "Excel, CSV, or signed PDF Scope of Work",
+        type=["xlsx", "xls", "csv", "pdf"],
     )
 
     if uploaded_file is None:
@@ -51,12 +52,15 @@ def render():
     if not st.button("Parse & Import", type="primary"):
         return
 
-    with st.spinner("Reading spreadsheet..."):
-        raw_text = _extract_raw_text(uploaded_file)
+    is_pdf = uploaded_file.name.lower().endswith(".pdf")
 
     with st.spinner("Asking Claude to structure the data..."):
         try:
-            parsed = parse_sow(raw_text)
+            if is_pdf:
+                parsed = parse_sow_from_pdf(uploaded_file.getvalue())
+            else:
+                raw_text = _extract_raw_text(uploaded_file)
+                parsed = parse_sow(raw_text)
         except Exception as e:
             st.error(f"Claude parsing failed: {e}")
             return
