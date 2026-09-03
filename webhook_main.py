@@ -25,6 +25,11 @@ import os
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from supabase import Client, create_client
 
+from services.bulk_status_update import (
+    apply_pending_update,
+    is_confirmation,
+    propose_bulk_update,
+)
 from services.db_writer import set_property_telegram_chat_id
 from services.journal_ai import filter_relevant_messages
 from services.materials_log import (
@@ -122,6 +127,22 @@ def _handle_jeeves_update(update: dict) -> None:
             chat_id, "🎩 Splendid — I shall send your daily summary here."
         )
         return
+
+    # 3. Bulk schedule status update — DM only (never a group), and
+    # always preview-then-confirm since percent_complete drives draw
+    # eligibility. A bare "yes" tries to confirm a pending proposal
+    # first; anything else is tried as a new instruction. Both return
+    # None (no reply sent) when neither applies, so ordinary DM chatter
+    # to Jeeves doesn't get a confusing response.
+    if chat_type == "private" and text:
+        reply = None
+        if is_confirmation(text):
+            reply = apply_pending_update(supabase, chat_id)
+        if reply is None:
+            reply = propose_bulk_update(supabase, chat_id, text)
+        if reply is not None:
+            send_telegram_message(chat_id, reply)
+            return
 
     # Everything below only applies to a group already linked to a property.
     property_row = next(
