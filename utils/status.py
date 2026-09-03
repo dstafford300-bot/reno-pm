@@ -1,3 +1,5 @@
+STATUS_OPTIONS = ["Pending", "In Progress", "Completed"]
+
 STATUS_COLORS = {
     "completed": "#10b981",  # emerald-500
     "complete": "#10b981",  # emerald-500

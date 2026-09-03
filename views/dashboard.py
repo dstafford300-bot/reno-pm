@@ -31,10 +31,8 @@ from services.timeline_drafter import (
     refine_timeline_draft,
     tasks_to_markdown_table,
 )
-from utils.status import normalize_status, status_color
+from utils.status import STATUS_OPTIONS, normalize_status, status_color
 from utils.units import sort_units_contingency_last
-
-STATUS_OPTIONS = ["Pending", "In Progress", "Completed"]
 
 # Positive match: only count a unit as a living unit if its name actually
 # looks like a residential unit identifier. Requires "unit"/"apt"/etc. to be

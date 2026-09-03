@@ -238,11 +238,21 @@ def render():
         unsafe_allow_html=True,
     )
 
+    def _queue_mobile_status_change(row, new_status: str, new_percent: int) -> None:
+        change_desc = f"{row['label']}: {new_status}"
+        if new_status == "In Progress":
+            change_desc += f" ({new_percent}%)"
+        st.session_state[pending_key].append(change_desc)
+
     event = render_responsive_gantt_chart(
         df,
         chronological_order,
         key_prefix=f"sched_{property_id}_{selected_unit_name}",
         show_chart=show_chart,
+        editable=True,
+        supabase=supabase,
+        is_archived=is_archived,
+        on_update=_queue_mobile_status_change,
     )
     selected_points = event.selection.points if event else []
     if selected_points:

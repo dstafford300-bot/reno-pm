@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from utils.mobile import inject_mobile_gantt_fallback_css, sanitize_key
-from utils.status import normalize_status, status_color
+from utils.status import STATUS_OPTIONS, normalize_status, status_color
 
 # Derived from utils.status so the chart never drifts from the pill colors
 # used in the Timeline Feed and Dashboard.
@@ -151,7 +151,14 @@ def build_gantt_figure(df, chronological_order: list[str]):
 
 
 def render_responsive_gantt_chart(
-    df, chronological_order: list[str], key_prefix: str, show_chart: bool = True
+    df,
+    chronological_order: list[str],
+    key_prefix: str,
+    show_chart: bool = True,
+    editable: bool = False,
+    supabase=None,
+    is_archived: bool = False,
+    on_update=None,
 ):
     """Renders the Gantt chart plus its mobile linear-list fallback.
 
@@ -165,6 +172,14 @@ def render_responsive_gantt_chart(
     `show_chart=False` (the Schedule page's own checkbox) skips building
     the chart entirely and forces the list on at every viewport/
     orientation — unchecking it always means "just show me the list."
+
+    `editable=True` (the Schedule page only — the read-only client view
+    never passes this) adds a status selectbox and, for "In Progress", a
+    percent input directly on each mobile card, since the chart's own
+    click-to-select quick-edit isn't reachable on the card-list fallback.
+    Requires `supabase`; `on_update(row, new_status, new_percent)` is
+    called after a successful write, for the caller's own pending-changes/
+    Telegram-publish bookkeeping.
 
     Shared by the Schedule page (which uses the returned click event to
     drive its quick-edit overlay) and the read-only client view (which
@@ -220,10 +235,16 @@ def render_responsive_gantt_chart(
                     color = status_color(status)
                     start_str = mobile_row["start_date"].strftime("%m-%d-%Y")
                     end_str = mobile_row["estimated_end_date"].strftime("%m-%d-%Y")
-                    st.markdown(
-                        f"""
-                        <div style="border:1px solid rgba(0,0,0,0.12);border-radius:10px;
-                                    padding:0.75rem 1rem;margin-bottom:0.6rem;">
+                    task_id = mobile_row["id"]
+
+                    # A second nested expander isn't possible here (this is
+                    # already inside the phase-level one — Streamlit doesn't
+                    # allow nesting them), so a bordered container is the
+                    # per-task card instead, with edit controls inline
+                    # rather than behind another tap.
+                    with st.container(border=True):
+                        st.markdown(
+                            f"""
                             <div style="font-weight:600;margin-bottom:0.35rem;">
                                 {html.escape(mobile_row['label'])}
                             </div>
@@ -236,9 +257,53 @@ def render_responsive_gantt_chart(
                                     {start_str} → {end_str}
                                 </span>
                             </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+                        if editable and supabase is not None:
+                            col_status, col_percent = st.columns(2)
+                            new_status = col_status.selectbox(
+                                "Status",
+                                STATUS_OPTIONS,
+                                index=(
+                                    STATUS_OPTIONS.index(status)
+                                    if status in STATUS_OPTIONS
+                                    else 0
+                                ),
+                                key=f"{key_prefix}_mstatus_{task_id}",
+                                disabled=is_archived,
+                            )
+                            if new_status == "In Progress":
+                                new_percent = col_percent.number_input(
+                                    "% complete",
+                                    min_value=0,
+                                    max_value=100,
+                                    step=5,
+                                    value=int(percent) if status == "In Progress" else 0,
+                                    key=f"{key_prefix}_mpercent_{task_id}",
+                                    disabled=is_archived,
+                                )
+                            elif new_status == "Completed":
+                                new_percent = 100
+                            else:
+                                new_percent = 0
+
+                            if st.button(
+                                "Update",
+                                key=f"{key_prefix}_mupdate_{task_id}",
+                                disabled=is_archived,
+                                width="stretch",
+                            ):
+                                supabase.table("line_items").update(
+                                    {
+                                        "status": new_status,
+                                        "percent_complete": new_percent,
+                                    }
+                                ).eq("id", task_id).execute()
+                                if on_update:
+                                    on_update(mobile_row, new_status, new_percent)
+                                st.success("Updated.")
+                                st.rerun()
 
     return event
