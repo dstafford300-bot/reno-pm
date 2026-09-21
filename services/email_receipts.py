@@ -34,6 +34,14 @@ from utils.settings import get_setting
 IMAP_SERVER = "imap.gmail.com"
 RECEIPT_SENDERS = ["homedepot", "lowes"]
 
+# All Mail, not INBOX: a Gmail filter files Home Depot receipts under a
+# label and out of the inbox, so an INBOX-only search never sees them.
+# Opened read-only, and only messages whose subject says "receipt" are
+# considered — a bare FROM match also catches marketing/perks emails,
+# which the body-text parser once turned into junk purchase records.
+MAILBOX = '"[Gmail]/All Mail"'
+SUBJECT_KEYWORD = "receipt"
+
 # Looks at recent mail regardless of read/unread — a Gmail filter that
 # auto-marks receipts read (and labels them) would otherwise hide every one
 # from an UNSEEN-only search. Dedupe is by Message-ID in processed_emails
@@ -236,7 +244,9 @@ def sync_email_receipts(supabase: Client, properties: list[dict]) -> dict:
     try:
         imap = imaplib.IMAP4_SSL(IMAP_SERVER)
         imap.login(user, password)
-        imap.select("INBOX")
+        status, _ = imap.select(MAILBOX, readonly=True)
+        if status != "OK":
+            imap.select("INBOX", readonly=True)
     except Exception:
         return {"found": 0, "processed": 0, "unassigned": 0}
 
@@ -244,7 +254,12 @@ def sync_email_receipts(supabase: Client, properties: list[dict]) -> dict:
     try:
         uids_seen: set[bytes] = set()
         for sender in RECEIPT_SENDERS:
-            status, data = imap.search(None, "SINCE", since, "FROM", f'"{sender}"')
+            status, data = imap.search(
+                None,
+                "SINCE", since,
+                "FROM", f'"{sender}"',
+                "SUBJECT", f'"{SUBJECT_KEYWORD}"',
+            )
             if status != "OK" or not data or not data[0]:
                 continue
 
