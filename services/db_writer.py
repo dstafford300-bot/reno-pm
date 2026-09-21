@@ -30,6 +30,7 @@ def create_material_log(
     source: str = "manual",
     line_items_json: list[dict] | None = None,
     unit_id: str | None = None,
+    unit_is_assumed: bool = False,
 ) -> dict:
     payload = {
         "store": store,
@@ -44,6 +45,8 @@ def create_material_log(
         # Only sent when set, so logging still works on a database that
         # hasn't had migration_material_unit.sql run yet.
         payload["unit_id"] = unit_id
+        if unit_is_assumed:
+            payload["unit_is_assumed"] = True
     if purchase_date:
         payload["purchase_date"] = purchase_date
     return supabase.table("material_logs").insert(payload).execute().data[0]
@@ -66,7 +69,7 @@ def assign_material_log_unit(
 ) -> dict:
     return (
         supabase.table("material_logs")
-        .update({"unit_id": unit_id})
+        .update({"unit_id": unit_id, "unit_is_assumed": False})
         .eq("id", material_log_id)
         .execute()
         .data[0]
@@ -74,6 +77,40 @@ def assign_material_log_unit(
 
 
 OVERRUN_ALERT_THRESHOLD = 0.9
+
+
+def resolve_receipt_unit(
+    supabase: Client, property_id: str | None, named_unit_id: str | None
+) -> tuple[str | None, bool]:
+    """(unit_id, assumed) for a new purchase. A unit named on the receipt
+    wins and is confirmed. Otherwise fall back to the property's default
+    unit — the one the PM is currently working in — marked assumed so it
+    stays visible and easy to correct. Neither: (None, False), and the
+    purchase waits in the "which unit?" list. Never raises."""
+    if named_unit_id:
+        return named_unit_id, False
+    if not property_id:
+        return None, False
+    try:
+        rows = (
+            supabase.table("properties")
+            .select("default_material_unit_id")
+            .eq("id", property_id)
+            .execute()
+            .data
+        )
+    except Exception:
+        return None, False  # migration not run yet
+    default_unit = rows[0].get("default_material_unit_id") if rows else None
+    return (default_unit, True) if default_unit else (None, False)
+
+
+def set_default_material_unit(
+    supabase: Client, property_id: str, unit_id: str | None
+) -> None:
+    supabase.table("properties").update({"default_material_unit_id": unit_id}).eq(
+        "id", property_id
+    ).execute()
 
 
 def _material_spend_by_unit(supabase: Client, property_id: str):
@@ -102,7 +139,7 @@ def _material_spend_by_unit(supabase: Client, property_id: str):
 
     logs = (
         supabase.table("material_logs")
-        .select("amount, unit_id, line_item_id")
+        .select("amount, unit_id, line_item_id, unit_is_assumed")
         .eq("property_id", property_id)
         .execute()
         .data
@@ -114,9 +151,11 @@ def _material_spend_by_unit(supabase: Client, property_id: str):
         amount = log.get("amount") or 0
         unit = log.get("unit_id") or task_unit.get(log.get("line_item_id"))
         if unit:
-            entry = by_unit.setdefault(unit, {"spent": 0.0, "count": 0})
+            entry = by_unit.setdefault(unit, {"spent": 0.0, "count": 0, "assumed": 0})
             entry["spent"] += amount
             entry["count"] += 1
+            if log.get("unit_is_assumed"):
+                entry["assumed"] += 1
         else:
             unassigned_spent += amount
             unassigned_count += 1
@@ -223,7 +262,9 @@ def get_line_items_with_labels(supabase: Client, property_id: str) -> list[dict]
 def get_materials_spend_by_unit(supabase: Client, property_id: str) -> dict:
     """Material spend per unit, WITHOUT any budget comparison — materials
     are tracked as materials. Returns {"units": [{"unit_id", "unit_name",
-    "spent", "count"}, ...] (biggest spend first, only units with any),
+    "spent", "count", "assumed"}, ...] (biggest spend first, only units with
+    any; "assumed" = purchases filed by the default unit, not named on the
+    receipt),
     "unassigned_spent", "unassigned_count"}."""
     units, by_unit, unassigned_spent, unassigned_count = _material_spend_by_unit(
         supabase, property_id
@@ -235,6 +276,7 @@ def get_materials_spend_by_unit(supabase: Client, property_id: str) -> dict:
             "unit_name": name_by_id.get(unit_id, "Unknown unit"),
             "spent": data["spent"],
             "count": data["count"],
+            "assumed": data["assumed"],
         }
         for unit_id, data in by_unit.items()
     ]

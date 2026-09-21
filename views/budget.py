@@ -17,7 +17,9 @@ from services.db_writer import (
     log_activity,
     milestone_is_eligible,
     release_draw_milestone,
+    resolve_receipt_unit,
     set_budget_includes_materials,
+    set_default_material_unit,
 )
 from services.email_receipts import sync_email_receipts
 from services.receipt_parser import (
@@ -208,7 +210,12 @@ def render():
             cols = st.columns([2.2, 1.2, 1.6, 1])
             cols[0].markdown(f"**{row['unit_name']}**")
             noun = "purchase" if row["count"] == 1 else "purchases"
-            cols[1].caption(f"Spent ${row['spent']:,.0f} ({row['count']} {noun})")
+            assumed_note = (
+                f", {row['assumed']} assumed" if row.get("assumed") else ""
+            )
+            cols[1].caption(
+                f"Spent ${row['spent']:,.0f} ({row['count']} {noun}{assumed_note})"
+            )
             budget_row = budget_by_unit.get(row["unit_id"])
             if budget_row:
                 cols[2].caption(
@@ -228,46 +235,114 @@ def render():
 
     if not variance_migration_missing:
         try:
-            unitless_logs = [
+            queue_logs = [
                 log
                 for log in (
                     supabase.table("material_logs")
-                    .select("id, store, amount, purchase_date, unit_id, line_item_id")
+                    .select(
+                        "id, store, amount, purchase_date, unit_id, line_item_id, "
+                        "unit_is_assumed"
+                    )
                     .eq("property_id", property_id)
                     .order("purchase_date", desc=True)
                     .execute()
                     .data
                 )
-                if not log.get("unit_id") and not log.get("line_item_id")
+                if log.get("unit_is_assumed")
+                or (not log.get("unit_id") and not log.get("line_item_id"))
             ]
         except Exception:
-            unitless_logs = []
-        if unitless_logs and units:
-            with st.expander(
-                f"🧮 Which unit was this for? ({len(unitless_logs)} unassigned)"
-            ):
+            queue_logs = []
+        if queue_logs and units:
+            unit_name_by_id = {u["id"]: u["unit_name"] for u in units}
+            with st.expander(f"🧮 Check which unit ({len(queue_logs)} to review)"):
                 st.caption(
-                    "Tip: ask the contractor to write the unit on the receipt "
-                    "(e.g. \"809 Fred Unit 3 kitchen\") and these file "
-                    "themselves."
+                    "These either name no unit or were filed under your "
+                    "default unit without the receipt saying so. Tip: ask "
+                    "the contractor to write the unit on the receipt (e.g. "
+                    "\"809 Fred Unit 3 kitchen\") and they file themselves."
                 )
-                for log in unitless_logs:
+                for log in queue_logs:
                     st.markdown(f"**{log['store']}** — ${log['amount']:,.2f}")
-                    st.caption(str(log.get("purchase_date") or "")[:10])
+                    current = unit_name_by_id.get(log.get("unit_id"))
+                    st.caption(
+                        f"{str(log.get('purchase_date') or '')[:10]}"
+                        + (f" · assumed: {current}" if current else " · no unit")
+                    )
+                    options = ["(no unit)"] + [u["unit_name"] for u in units]
                     unit_choice = st.selectbox(
                         "Unit",
-                        ["(unassigned)"] + [u["unit_name"] for u in units],
+                        options,
+                        index=options.index(current) if current in options else 0,
                         key=f"assign_unit_{log['id']}",
                         label_visibility="collapsed",
                         disabled=is_archived,
                     )
-                    if unit_choice != "(unassigned)":
+                    changed = unit_choice not in ("(no unit)", current)
+                    confirm = current and st.button(
+                        f"✓ It's {current}",
+                        key=f"confirm_unit_{log['id']}",
+                        disabled=is_archived,
+                    )
+                    if changed or confirm:
+                        chosen_name = unit_choice if changed else current
                         chosen_unit = next(
-                            u["id"] for u in units if u["unit_name"] == unit_choice
+                            u["id"] for u in units if u["unit_name"] == chosen_name
                         )
                         assign_material_log_unit(supabase, log["id"], chosen_unit)
                         _fire_overrun_alert_if_crossed(supabase, chosen_unit)
                         st.rerun()
+
+        with st.expander("⚙️ Receipts that don't name a unit"):
+            st.caption(
+                "If a receipt doesn't say which unit it's for, it's filed "
+                "under this default and marked \"assumed\" so you can "
+                "correct it above. Set it to the unit you're working in "
+                "right now, and switch it when the crew moves on."
+            )
+            try:
+                default_rows = (
+                    supabase.table("properties")
+                    .select("default_material_unit_id")
+                    .eq("id", property_id)
+                    .execute()
+                    .data
+                )
+                current_default = (
+                    default_rows[0].get("default_material_unit_id")
+                    if default_rows
+                    else None
+                )
+            except Exception:
+                current_default = None
+            default_options = ["(none — I'll choose each time)"] + [
+                u["unit_name"] for u in units
+            ]
+            current_default_name = next(
+                (u["unit_name"] for u in units if u["id"] == current_default), None
+            )
+            default_choice = st.selectbox(
+                "Default unit",
+                default_options,
+                index=(
+                    default_options.index(current_default_name)
+                    if current_default_name
+                    else 0
+                ),
+                key=f"default_unit_{property_id}",
+                disabled=is_archived,
+            )
+            if st.button(
+                "Save default",
+                key=f"save_default_unit_{property_id}",
+                disabled=is_archived,
+            ):
+                new_default = next(
+                    (u["id"] for u in units if u["unit_name"] == default_choice), None
+                )
+                set_default_material_unit(supabase, property_id, new_default)
+                st.success("Saved.")
+                st.rerun()
 
     if not variance_migration_missing:
         with st.expander("⚙️ Tasks whose budget includes materials"):
@@ -525,7 +600,24 @@ def render():
                     ),
                     None,
                 )
-                if suggested_name:
+                if not suggested_name:
+                    default_unit_id, _ = resolve_receipt_unit(
+                        supabase, matched_id, None
+                    )
+                    suggested_name = next(
+                        (
+                            u["unit_name"]
+                            for u in candidate_units
+                            if u["id"] == default_unit_id
+                        ),
+                        None,
+                    )
+                    if suggested_name:
+                        st.info(
+                            "No unit on the receipt — using your default "
+                            f"unit: {suggested_name}"
+                        )
+                else:
                     st.info(f"Job name on the receipt points to: {suggested_name}")
                 unit_label_choice = st.selectbox(
                     "File under unit",
