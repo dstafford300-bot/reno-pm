@@ -39,8 +39,8 @@ RECEIPT_SENDERS = ["homedepot", "lowes"]
 # Opened read-only, and only messages whose subject says "receipt" are
 # considered — a bare FROM match also catches marketing/perks emails,
 # which the body-text parser once turned into junk purchase records.
-MAILBOX = '"[Gmail]/All Mail"'
 SUBJECT_KEYWORD = "receipt"
+_LIST_LINE_RE = re.compile(rb'\((?P<flags>[^)]*)\)\s+"[^"]*"\s+(?P<name>.+)$')
 
 # Looks at recent mail regardless of read/unread — a Gmail filter that
 # auto-marks receipts read (and labels them) would otherwise hide every one
@@ -94,6 +94,25 @@ def _extract_plain_text_body(msg: Message) -> str:
     if msg.get_content_type() == "text/html":
         return _html_to_text(text)
     return text
+
+
+def _find_all_mail_mailbox(imap: imaplib.IMAP4_SSL) -> str:
+    """The name of Gmail's "All Mail" folder, found via its \\All special-
+    use flag rather than by name — it's "[Gmail]/All Mail" for most
+    accounts but "[Google Mail]/All Mail" on others (regional accounts),
+    and a hardcoded name silently fell back to the inbox. Falls back to
+    INBOX if no folder carries the flag."""
+    try:
+        status, lines = imap.list()
+        if status == "OK":
+            for line in lines or []:
+                match = _LIST_LINE_RE.search(line or b"")
+                if match and b"\\All" in match.group("flags"):
+                    name = match.group("name").decode().strip()
+                    return name if name.startswith('"') else f'"{name}"'
+    except Exception:
+        pass
+    return "INBOX"
 
 
 def _imap_date(d: date) -> str:
@@ -244,7 +263,7 @@ def sync_email_receipts(supabase: Client, properties: list[dict]) -> dict:
     try:
         imap = imaplib.IMAP4_SSL(IMAP_SERVER)
         imap.login(user, password)
-        status, _ = imap.select(MAILBOX, readonly=True)
+        status, _ = imap.select(_find_all_mail_mailbox(imap), readonly=True)
         if status != "OK":
             imap.select("INBOX", readonly=True)
     except Exception:
