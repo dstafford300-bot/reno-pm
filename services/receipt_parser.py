@@ -1,6 +1,15 @@
+import base64
 import re
 
 from utils.anthropic_client import get_anthropic_client, get_model
+
+
+class NotAReceiptError(ValueError):
+    """Raised when the input didn't yield a readable receipt (no numeric
+    total). Distinct from a transient API/network failure so callers can
+    tell "this email isn't a receipt, stop retrying it" apart from "try
+    again next run"."""
+
 
 MATCH_LINE_ITEM_TOOL = {
     "name": "record_task_match",
@@ -51,6 +60,14 @@ RECEIPT_TOOL = {
                     "required": ["description", "cost"],
                 },
             },
+            "job_or_property_reference": {
+                "type": ["string", "null"],
+                "description": (
+                    "Any job name, PO number, or address printed on the "
+                    "receipt that could identify which property the "
+                    "purchase was for. Null if none is printed."
+                ),
+            },
         },
         "required": ["store_name", "total_cost"],
     },
@@ -72,6 +89,21 @@ Call the record_receipt tool with the result. Do not include any commentary \
 outside of the tool call."""
 
 
+def _validated_receipt(tool_input: dict) -> dict:
+    """Claude occasionally fills a required numeric field with a
+    placeholder string like "<UNKNOWN>" instead of a number when the
+    input has no real receipt data (seen in production: a Home Depot
+    email whose actual receipt was in a PDF attachment, leaving only
+    boilerplate in the body). That crashed the Postgres insert and, since
+    the email stayed unprocessed, the nightly job every night after.
+    Refusing a non-numeric total here turns that into a clean "not a
+    readable receipt" instead of junk data."""
+    total = tool_input.get("total_cost")
+    if isinstance(total, bool) or not isinstance(total, (int, float)):
+        raise NotAReceiptError(f"no numeric total found (got {total!r})")
+    return tool_input
+
+
 def parse_receipt_text(raw_text: str) -> dict:
     client = get_anthropic_client()
     message = client.messages.create(
@@ -83,7 +115,57 @@ def parse_receipt_text(raw_text: str) -> dict:
         messages=[{"role": "user", "content": raw_text}],
     )
     tool_use = next(block for block in message.content if block.type == "tool_use")
-    return tool_use.input
+    return _validated_receipt(tool_use.input)
+
+
+PDF_SYSTEM_PROMPT = """You are extracting structured data from a hardware/home-\
+improvement store receipt delivered as a PDF (Home Depot, Lowe's, or similar).
+
+Extract:
+- store_name
+- purchase_date (YYYY-MM-DD)
+- total_cost (the final total actually charged, not a subtotal)
+- line_items: every individual item purchased with its cost
+- job_or_property_reference: any job name, PO number, or address printed on it
+
+If you cannot find a real numeric total on the document, do NOT invent one or \
+write a placeholder — this may not be a receipt at all.
+
+Call the record_receipt tool with the result. Do not include any commentary \
+outside of the tool call."""
+
+
+def parse_receipt_pdf(pdf_bytes: bytes) -> dict:
+    """Same as parse_receipt_text, for a receipt delivered as a PDF
+    attachment (Home Depot emails put the whole receipt in one — the
+    email body is only a thank-you note). Claude reads the PDF natively."""
+    client = get_anthropic_client()
+    pdf_b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
+    message = client.messages.create(
+        model=get_model(),
+        max_tokens=2048,
+        system=PDF_SYSTEM_PROMPT,
+        tools=[RECEIPT_TOOL],
+        tool_choice={"type": "tool", "name": "record_receipt"},
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_b64,
+                        },
+                    },
+                    {"type": "text", "text": "Extract this receipt."},
+                ],
+            }
+        ],
+    )
+    tool_use = next(block for block in message.content if block.type == "tool_use")
+    return _validated_receipt(tool_use.input)
 
 
 def match_property_from_text(text: str, properties: list[dict]) -> str | None:
