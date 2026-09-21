@@ -1,6 +1,6 @@
 from supabase import Client
 
-from services.db_writer import create_material_log, resolve_receipt_unit
+from services.db_writer import create_material_log
 from services.receipt_parser import extract_amount_hint, match_unit_from_reference
 from services.storage import upload_receipt_photo
 from services.telegram_bot import download_file_bytes
@@ -45,7 +45,6 @@ def process_receipt_message(
         unit_id = match_unit_from_reference(caption, units)
     except Exception:
         pass  # unit matching is best-effort, never blocks the log
-    unit_id, unit_is_assumed = resolve_receipt_unit(supabase, property_id, unit_id)
 
     return create_material_log(
         supabase,
@@ -57,5 +56,4 @@ def process_receipt_message(
         photo_url=photo_url,
         source="telegram",
         unit_id=unit_id,
-        unit_is_assumed=unit_is_assumed,
     )

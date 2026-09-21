@@ -32,7 +32,7 @@ def render():
             supabase.table("material_logs")
             .select(
                 "id, store, amount, purchase_date, receipt_details, photo_url, "
-                "source, line_items_json, unit_id, line_item_id, unit_is_assumed"
+                "source, line_items_json, unit_id, line_item_id"
             )
             .eq("property_id", property_id)
             .order("purchase_date", desc=True)
@@ -89,8 +89,7 @@ def render():
                     log.get("unit_id") or task_unit_by_id.get(log.get("line_item_id"))
                 )
                 if unit_name:
-                    note = " (assumed — receipt named no unit)" if log.get("unit_is_assumed") else ""
-                    st.caption(f"📍 {unit_name}{note}")
+                    st.caption(f"📍 {unit_name}")
                 if log.get("receipt_details"):
                     st.caption(log["receipt_details"][:300])
                 for li in log.get("line_items_json") or []:

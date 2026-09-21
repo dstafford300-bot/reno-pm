@@ -16,11 +16,7 @@ import imaplib
 
 from supabase import Client
 
-from services.db_writer import (
-    check_unit_overrun,
-    create_material_log,
-    resolve_receipt_unit,
-)
+from services.db_writer import check_unit_overrun, create_material_log
 from services.receipt_parser import (
     NotAReceiptError,
     match_property_from_text,
@@ -189,8 +185,7 @@ def _log_one_email(supabase: Client, msg: Message, properties: list[dict]) -> bo
 
     # The unit comes from the job name printed on the receipt ("809 Fred
     # Unit 3 kitchen") — contractors write it at checkout. No unit named
-    # means the property's default unit is used (marked assumed), or it
-    # stays unassigned for the PM to file — never an AI guess.
+    # means it stays unassigned for the PM to file, never a guess.
     unit_id = None
     if property_id:
         try:
@@ -204,7 +199,6 @@ def _log_one_email(supabase: Client, msg: Message, properties: list[dict]) -> bo
             unit_id = match_unit_from_reference(reference, units)
         except Exception:
             pass  # unit matching is best-effort, never blocks the log
-    unit_id, unit_is_assumed = resolve_receipt_unit(supabase, property_id, unit_id)
 
     create_material_log(
         supabase,
@@ -216,7 +210,6 @@ def _log_one_email(supabase: Client, msg: Message, properties: list[dict]) -> bo
         source="email",
         line_items_json=parsed.get("line_items"),
         unit_id=unit_id,
-        unit_is_assumed=unit_is_assumed,
     )
 
     if unit_id:
