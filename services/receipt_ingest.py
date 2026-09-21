@@ -1,7 +1,7 @@
 from supabase import Client
 
 from services.db_writer import create_material_log
-from services.receipt_parser import extract_amount_hint
+from services.receipt_parser import extract_amount_hint, match_unit_from_reference
 from services.storage import upload_receipt_photo
 from services.telegram_bot import download_file_bytes
 
@@ -32,6 +32,20 @@ def process_receipt_message(
     caption = message.get("message_text") or ""
     amount = extract_amount_hint(caption) or 0
 
+    # A caption like "jeeves receipt unit 3 kitchen $120" can name the unit.
+    unit_id = None
+    try:
+        units = (
+            supabase.table("units")
+            .select("id, unit_name")
+            .eq("property_id", property_id)
+            .execute()
+            .data
+        )
+        unit_id = match_unit_from_reference(caption, units)
+    except Exception:
+        pass  # unit matching is best-effort, never blocks the log
+
     return create_material_log(
         supabase,
         store="Telegram Receipt",
@@ -41,4 +55,5 @@ def process_receipt_message(
         receipt_details=caption,
         photo_url=photo_url,
         source="telegram",
+        unit_id=unit_id,
     )

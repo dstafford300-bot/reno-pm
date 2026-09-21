@@ -9,8 +9,8 @@ from datetime import date, datetime, timedelta, timezone
 from supabase import Client
 
 from services.db_writer import (
-    get_line_item_cost_variance,
     get_milestone_task_progress,
+    get_unit_budget_comparison,
     milestone_is_eligible,
 )
 from services.telegram_bot import format_daily_digest_message, send_daily_digest
@@ -53,8 +53,8 @@ def build_action_items(client: Client, property_id: str) -> list[str]:
       - Draws whose linked tasks have all met their required completion
         % (milestone_is_eligible) but haven't been released yet.
       - Tasks past their estimated_end_date that aren't Completed.
-      - Tasks whose logged material spend exceeds budgeted_cost (negative
-        variance from get_line_item_cost_variance).
+      - Units whose material spend exceeds the budget of their labor +
+        materials tasks (negative get_unit_budget_comparison variance).
     """
     items: list[str] = []
 
@@ -102,14 +102,14 @@ def build_action_items(client: Client, property_id: str) -> list[str]:
         pass
 
     try:
-        for row in get_line_item_cost_variance(client, property_id):
+        for row in get_unit_budget_comparison(client, property_id):
             if row["variance"] < 0:
                 items.append(
-                    f"📈 Over budget: {row['unit_name']}: {row['task_name']} — "
-                    f"${abs(row['variance']):,.2f} over"
+                    f"📈 Materials over budget: {row['unit_name']} "
+                    f"(labor + materials) — ${abs(row['variance']):,.2f} over"
                 )
     except Exception:
-        pass  # material_line_item migration not run yet
+        pass  # material_unit migration not run yet
 
     return items
 

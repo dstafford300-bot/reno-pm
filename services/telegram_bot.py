@@ -395,16 +395,15 @@ def send_draw_release_alert(
 def format_cost_overrun_alert(
     property_name: str,
     unit_name: str,
-    task_name: str,
     budgeted_cost: float,
     spent: float,
     percent: float,
 ) -> str:
     return (
-        f"⚠️ <b>Budget Overrun Warning</b>\n\n"
+        f"⚠️ <b>Materials Budget Warning</b>\n\n"
         f"🎩 I regret to report a matter of some concern from "
         f"<b>{html.escape(property_name)}</b>.\n\n"
-        f"🛠️ <b>Task:</b> {html.escape(unit_name)}: {html.escape(task_name)}\n"
+        f"🧱 <b>Area:</b> {html.escape(unit_name)} (labor + materials budget)\n"
         f"💷 <b>Budgeted:</b> ${budgeted_cost:,.2f}\n"
         f"🧾 <b>Materials logged so far:</b> ${spent:,.2f} "
         f"({percent * 100:.0f}% of budget)\n\n"
@@ -415,7 +414,6 @@ def format_cost_overrun_alert(
 def send_cost_overrun_alert(
     property_name: str,
     unit_name: str,
-    task_name: str,
     budgeted_cost: float,
     spent: float,
     percent: float,
@@ -423,7 +421,7 @@ def send_cost_overrun_alert(
 ) -> bool:
     target_chat_id = chat_id or _get_default_chat_id()
     message = format_cost_overrun_alert(
-        property_name, unit_name, task_name, budgeted_cost, spent, percent
+        property_name, unit_name, budgeted_cost, spent, percent
     )
     return send_telegram_message(target_chat_id, message)
 

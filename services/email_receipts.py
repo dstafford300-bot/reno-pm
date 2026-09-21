@@ -16,15 +16,11 @@ import imaplib
 
 from supabase import Client
 
-from services.db_writer import (
-    check_line_item_overrun,
-    create_material_log,
-    get_line_items_with_labels,
-)
+from services.db_writer import check_unit_overrun, create_material_log
 from services.receipt_parser import (
     NotAReceiptError,
-    match_line_item_from_receipt,
     match_property_from_text,
+    match_unit_from_reference,
     parse_receipt_pdf,
     parse_receipt_text,
 )
@@ -176,24 +172,33 @@ def _log_one_email(supabase: Client, msg: Message, properties: list[dict]) -> bo
             for li in parsed.get("line_items") or []
         )
         match_text = f"{body}\n{reference}"
-        receipt_text = f"{item_lines}\n{reference}"
         receipt_details = f"{_decoded_subject(msg)}\n{reference}\n{item_lines}"[:5000]
     elif body.strip():
         parsed = parse_receipt_text(body)
-        match_text = receipt_text = body
+        reference = parsed.get("job_or_property_reference") or ""
+        match_text = body
         receipt_details = body[:5000]
     else:
         raise NotAReceiptError("no body text and no PDF attachment")
 
     property_id = match_property_from_text(match_text, properties)
 
-    line_item_id = None
+    # The unit comes from the job name printed on the receipt ("809 Fred
+    # Unit 3 kitchen") — contractors write it at checkout. No unit named
+    # means it stays unassigned for the PM to file, never a guess.
+    unit_id = None
     if property_id:
         try:
-            candidates = get_line_items_with_labels(supabase, property_id)
-            line_item_id = match_line_item_from_receipt(receipt_text, candidates)
+            units = (
+                supabase.table("units")
+                .select("id, unit_name")
+                .eq("property_id", property_id)
+                .execute()
+                .data
+            )
+            unit_id = match_unit_from_reference(reference, units)
         except Exception:
-            pass  # task matching is best-effort, never blocks the log
+            pass  # unit matching is best-effort, never blocks the log
 
     create_material_log(
         supabase,
@@ -204,17 +209,16 @@ def _log_one_email(supabase: Client, msg: Message, properties: list[dict]) -> bo
         receipt_details=receipt_details,
         source="email",
         line_items_json=parsed.get("line_items"),
-        line_item_id=line_item_id,
+        unit_id=unit_id,
     )
 
-    if line_item_id:
+    if unit_id:
         try:
-            overrun = check_line_item_overrun(supabase, line_item_id)
+            overrun = check_unit_overrun(supabase, unit_id)
             if overrun:
                 send_cost_overrun_alert(
                     property_name=overrun["property_name"],
                     unit_name=overrun["unit_name"],
-                    task_name=overrun["task_name"],
                     budgeted_cost=overrun["budgeted_cost"],
                     spent=overrun["spent"],
                     percent=overrun["percent"],

@@ -4,16 +4,16 @@ import streamlit as st
 
 from db.connection import get_supabase_client
 from services.db_writer import (
-    assign_material_log_line_item,
+    assign_material_log_unit,
     assign_material_log_property,
-    check_line_item_overrun,
+    check_unit_overrun,
     create_draw_milestone,
     create_material_log,
     delete_draw_milestone,
-    get_line_item_cost_variance,
     get_line_items_with_labels,
-    get_materials_spend_by_task,
+    get_materials_spend_by_unit,
     get_milestone_task_progress,
+    get_unit_budget_comparison,
     log_activity,
     milestone_is_eligible,
     release_draw_milestone,
@@ -21,23 +21,23 @@ from services.db_writer import (
 )
 from services.email_receipts import sync_email_receipts
 from services.receipt_parser import (
-    match_line_item_from_receipt,
     match_property_from_text,
+    match_unit_from_reference,
     parse_receipt_text,
 )
 from services.telegram_bot import send_cost_overrun_alert, send_draw_release_alert
 from utils.mobile import inject_mobile_button_css, inject_mobile_card_css
 
 
-def _fire_overrun_alert_if_crossed(supabase, line_item_id: str | None) -> None:
-    """Best-effort: checks whether assigning this purchase just pushed the
-    task's spend over the alert threshold, and if so fires the Telegram
-    alert in the background. No-ops silently on any failure — a missed
-    overrun alert shouldn't block saving/assigning a purchase."""
-    if not line_item_id:
+def _fire_overrun_alert_if_crossed(supabase, unit_id: str | None) -> None:
+    """Best-effort: checks whether filing this purchase under a unit just
+    pushed its labor + materials budget past the alert threshold, and if
+    so fires the Telegram alert in the background. No-ops silently on any
+    failure — a missed alert shouldn't block saving/assigning a purchase."""
+    if not unit_id:
         return
     try:
-        overrun = check_line_item_overrun(supabase, line_item_id)
+        overrun = check_unit_overrun(supabase, unit_id)
     except Exception:
         return
     if not overrun:
@@ -47,7 +47,6 @@ def _fire_overrun_alert_if_crossed(supabase, line_item_id: str | None) -> None:
         kwargs=dict(
             property_name=overrun["property_name"],
             unit_name=overrun["unit_name"],
-            task_name=overrun["task_name"],
             budgeted_cost=overrun["budgeted_cost"],
             spent=overrun["spent"],
             percent=overrun["percent"],
@@ -182,35 +181,35 @@ def render():
 
     st.divider()
 
-    st.subheader("🧾 Materials by Task")
+    st.subheader("🧾 Materials by Unit")
     st.caption(
         "Materials are tracked as materials, separate from the SOW budget "
         "(which is labor, except tasks marked below as labor + materials). "
-        "This shows what was bought for each task — only labor + materials "
-        "tasks are compared against a budget."
+        "Each purchase is filed under the unit named on the receipt; only "
+        "units with labor + materials tasks are compared against a budget."
     )
     variance_migration_missing = False
-    spend_rows = []
-    variance_by_id = {}
+    spend = {"units": [], "unassigned_spent": 0, "unassigned_count": 0}
+    budget_by_unit = {}
     try:
-        spend_rows = get_materials_spend_by_task(supabase, property_id)
-        variance_by_id = {
-            r["line_item_id"]: r
-            for r in get_line_item_cost_variance(supabase, property_id)
+        spend = get_materials_spend_by_unit(supabase, property_id)
+        budget_by_unit = {
+            r["unit_id"]: r for r in get_unit_budget_comparison(supabase, property_id)
         }
     except Exception:
         variance_migration_missing = True
         st.caption(
-            "Run scripts/migration_material_line_item.sql and "
+            "Run scripts/migration_material_unit.sql and "
             "scripts/migration_budget_includes_materials.sql via Supabase's "
-            "SQL Editor to enable task-level material tracking."
+            "SQL Editor to enable per-unit material tracking."
         )
-    if spend_rows:
-        for row in spend_rows:
-            cols = st.columns([3, 1, 1.4, 1])
-            cols[0].markdown(f"**{row['unit_name']}: {row['task_name']}**")
-            cols[1].caption(f"Spent ${row['spent']:,.0f}")
-            budget_row = variance_by_id.get(row["line_item_id"])
+    if spend["units"]:
+        for row in spend["units"]:
+            cols = st.columns([2.2, 1.2, 1.6, 1])
+            cols[0].markdown(f"**{row['unit_name']}**")
+            noun = "purchase" if row["count"] == 1 else "purchases"
+            cols[1].caption(f"Spent ${row['spent']:,.0f} ({row['count']} {noun})")
+            budget_row = budget_by_unit.get(row["unit_id"])
             if budget_row:
                 cols[2].caption(
                     f"Budget (labor + materials) ${budget_row['budgeted_cost']:,.0f}"
@@ -220,43 +219,54 @@ def render():
                 else:
                     cols[3].success(f"+${budget_row['variance']:,.0f}")
     elif not variance_migration_missing:
-        st.caption("No purchases have been assigned to a task yet.")
+        st.caption("No purchases have been filed under a unit yet.")
+    if spend["unassigned_count"]:
+        st.caption(
+            f"${spend['unassigned_spent']:,.0f} in {spend['unassigned_count']} "
+            "purchase(s) not yet filed under a unit — see below."
+        )
 
     if not variance_migration_missing:
         try:
-            untasked_logs = (
-                supabase.table("material_logs")
-                .select("id, store, amount, purchase_date, receipt_details")
-                .eq("property_id", property_id)
-                .is_("line_item_id", "null")
-                .order("purchase_date", desc=True)
-                .execute()
-                .data
-            )
+            unitless_logs = [
+                log
+                for log in (
+                    supabase.table("material_logs")
+                    .select("id, store, amount, purchase_date, unit_id, line_item_id")
+                    .eq("property_id", property_id)
+                    .order("purchase_date", desc=True)
+                    .execute()
+                    .data
+                )
+                if not log.get("unit_id") and not log.get("line_item_id")
+            ]
         except Exception:
-            untasked_logs = []
-        if untasked_logs and line_item_labels:
+            unitless_logs = []
+        if unitless_logs and units:
             with st.expander(
-                f"🧮 Assign purchases to tasks ({len(untasked_logs)} unassigned)"
+                f"🧮 Which unit was this for? ({len(unitless_logs)} unassigned)"
             ):
-                for log in untasked_logs:
+                st.caption(
+                    "Tip: ask the contractor to write the unit on the receipt "
+                    "(e.g. \"809 Fred Unit 3 kitchen\") and these file "
+                    "themselves."
+                )
+                for log in unitless_logs:
                     st.markdown(f"**{log['store']}** — ${log['amount']:,.2f}")
-                    st.caption(log.get("purchase_date") or "")
-                    task_choice = st.selectbox(
-                        "Assign to task",
-                        ["(unassigned)"] + [row["label"] for row in line_item_labels],
-                        key=f"assign_task_{log['id']}",
+                    st.caption(str(log.get("purchase_date") or "")[:10])
+                    unit_choice = st.selectbox(
+                        "Unit",
+                        ["(unassigned)"] + [u["unit_name"] for u in units],
+                        key=f"assign_unit_{log['id']}",
                         label_visibility="collapsed",
                         disabled=is_archived,
                     )
-                    if task_choice != "(unassigned)":
-                        chosen_id = next(
-                            row["id"]
-                            for row in line_item_labels
-                            if row["label"] == task_choice
+                    if unit_choice != "(unassigned)":
+                        chosen_unit = next(
+                            u["id"] for u in units if u["unit_name"] == unit_choice
                         )
-                        assign_material_log_line_item(supabase, log["id"], chosen_id)
-                        _fire_overrun_alert_if_crossed(supabase, chosen_id)
+                        assign_material_log_unit(supabase, log["id"], chosen_unit)
+                        _fire_overrun_alert_if_crossed(supabase, chosen_unit)
                         st.rerun()
 
     if not variance_migration_missing:
@@ -484,49 +494,50 @@ def render():
                     "go into the Unassigned Materials queue below."
                 )
 
-            task_choice_id = None
+            unit_choice_id = None
             if matched_id:
-                candidate_labels = (
-                    line_item_labels
+                candidate_units = (
+                    units
                     if matched_id == property_id
-                    else get_line_items_with_labels(supabase, matched_id)
+                    else supabase.table("units")
+                    .select("id, unit_name")
+                    .eq("property_id", matched_id)
+                    .execute()
+                    .data
                 )
-                if candidate_labels and "suggested_task_id" not in st.session_state:
-                    with st.spinner("Checking which task this was for..."):
-                        st.session_state["suggested_task_id"] = (
-                            match_line_item_from_receipt(
-                                st.session_state.get("parsed_receipt_raw", ""),
-                                candidate_labels,
+                if candidate_units and "suggested_unit_id" not in st.session_state:
+                    with st.spinner("Reading the job name for a unit..."):
+                        st.session_state["suggested_unit_id"] = (
+                            match_unit_from_reference(
+                                parsed.get("job_or_property_reference")
+                                or st.session_state.get("parsed_receipt_raw", ""),
+                                candidate_units,
                             )
                         )
-                label_options = ["(none — property-level only)"] + [
-                    row["label"] for row in candidate_labels
+                unit_options = ["(not filed under a unit)"] + [
+                    u["unit_name"] for u in candidate_units
                 ]
-                suggested_id = st.session_state.get("suggested_task_id")
-                suggested_label = next(
+                suggested_name = next(
                     (
-                        row["label"]
-                        for row in candidate_labels
-                        if row["id"] == suggested_id
+                        u["unit_name"]
+                        for u in candidate_units
+                        if u["id"] == st.session_state.get("suggested_unit_id")
                     ),
                     None,
                 )
-                default_index = (
-                    label_options.index(suggested_label) if suggested_label else 0
+                if suggested_name:
+                    st.info(f"Job name on the receipt points to: {suggested_name}")
+                unit_label_choice = st.selectbox(
+                    "File under unit",
+                    unit_options,
+                    index=unit_options.index(suggested_name) if suggested_name else 0,
+                    key="receipt_unit_choice",
                 )
-                if suggested_label:
-                    st.info(f"Suggested task: {suggested_label}")
-                task_label_choice = st.selectbox(
-                    "Assign to task (optional)",
-                    label_options,
-                    index=default_index,
-                    key="receipt_task_choice",
-                )
-                if task_label_choice != "(none — property-level only)":
-                    task_choice_id = next(
-                        row["id"]
-                        for row in candidate_labels
-                        if row["label"] == task_label_choice
+                if unit_label_choice != "(not filed under a unit)":
+                    unit_choice_id = next(
+                        u["id"]
+                        for u in candidate_units
+                        if u["unit_name"] == unit_label_choice
                     )
 
             if st.button("Save Receipt", key="save_receipt", width="stretch"):
@@ -539,13 +550,13 @@ def render():
                     receipt_details=st.session_state.get("parsed_receipt_raw"),
                     source="manual",
                     line_items_json=parsed.get("line_items"),
-                    line_item_id=task_choice_id,
+                    unit_id=unit_choice_id,
                 )
-                _fire_overrun_alert_if_crossed(supabase, task_choice_id)
+                _fire_overrun_alert_if_crossed(supabase, unit_choice_id)
                 del st.session_state["parsed_receipt"]
                 del st.session_state["parsed_receipt_raw"]
-                st.session_state.pop("suggested_task_id", None)
-                st.session_state.pop("receipt_task_choice", None)
+                st.session_state.pop("suggested_unit_id", None)
+                st.session_state.pop("receipt_unit_choice", None)
                 st.success("Receipt saved.")
                 st.rerun()
 

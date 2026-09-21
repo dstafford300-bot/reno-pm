@@ -11,29 +11,6 @@ class NotAReceiptError(ValueError):
     again next run"."""
 
 
-MATCH_LINE_ITEM_TOOL = {
-    "name": "record_task_match",
-    "description": (
-        "Record which single scope-of-work task (if any) a hardware/"
-        "materials purchase was most likely bought for."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "matched_label": {
-                "type": ["string", "null"],
-                "description": (
-                    "The exact label (from the provided list) of the one "
-                    "task this purchase's items are most clearly for, or "
-                    "null if nothing on the list is a clear, confident "
-                    "match — don't guess."
-                ),
-            }
-        },
-        "required": ["matched_label"],
-    },
-}
-
 RECEIPT_TOOL = {
     "name": "record_receipt",
     "description": (
@@ -84,6 +61,7 @@ Extract:
 - purchase_date (YYYY-MM-DD)
 - total_cost (the final total actually charged, not a subtotal)
 - line_items: every individual item purchased with its cost
+- job_or_property_reference: any job name, PO number, or address printed on it
 
 Call the record_receipt tool with the result. Do not include any commentary \
 outside of the tool call."""
@@ -168,6 +146,68 @@ def parse_receipt_pdf(pdf_bytes: bytes) -> dict:
     return _validated_receipt(tool_use.input)
 
 
+MATCH_UNIT_TOOL = {
+    "name": "record_unit_match",
+    "description": (
+        "Record which unit/area of a property a purchase was for, based on "
+        "the job name written on the receipt."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "matched_index": {
+                "type": ["integer", "null"],
+                "description": (
+                    "Index (from the provided list) of the unit or area the "
+                    "job name refers to, or null if it doesn't name one "
+                    "(e.g. it's only the street address) — don't guess."
+                ),
+            }
+        },
+        "required": ["matched_index"],
+    },
+}
+
+
+def match_unit_from_reference(reference_text: str, units: list[dict]) -> str | None:
+    """units: [{"id": ..., "unit_name": ...}, ...]. Reads the job name
+    written on a receipt (e.g. "809 Fred Unit 3 kitchen") and returns the
+    id of the unit/area it names, or None if it names none. Returns None
+    rather than guessing — an unassigned purchase is easy for the PM to
+    file; one filed under the wrong unit quietly skews that unit's
+    materials spend."""
+    if not (reference_text or "").strip() or not units:
+        return None
+    listing = "\n".join(f"{i}. {u['unit_name']}" for i, u in enumerate(units))
+
+    client = get_anthropic_client()
+    message = client.messages.create(
+        model=get_model(),
+        max_tokens=256,
+        system=(
+            "A contractor writes a job name on a hardware-store receipt, "
+            'e.g. "809 Fred Unit 3 kitchen". Given the text and the '
+            "property's list of units/areas, return the index of the "
+            "unit or area it names. If it names none — only the street "
+            "address, or something that doesn't correspond to a listed "
+            "unit — return null. Never guess."
+        ),
+        tools=[MATCH_UNIT_TOOL],
+        tool_choice={"type": "tool", "name": "record_unit_match"},
+        messages=[
+            {
+                "role": "user",
+                "content": f"Receipt job name: {reference_text}\n\nUnits:\n{listing}",
+            }
+        ],
+    )
+    tool_use = next(block for block in message.content if block.type == "tool_use")
+    index = tool_use.input.get("matched_index")
+    if isinstance(index, int) and 0 <= index < len(units):
+        return units[index]["id"]
+    return None
+
+
 def match_property_from_text(text: str, properties: list[dict]) -> str | None:
     """properties: [{"id": ..., "property_name": ...}, ...].
 
@@ -206,60 +246,6 @@ def match_property_from_text(text: str, properties: list[dict]) -> str | None:
             if re.search(rf"\b{re.escape(token_clean)}\b", lowered):
                 return prop["id"]
     return None
-
-
-def match_line_item_from_receipt(
-    receipt_text: str, line_items: list[dict]
-) -> str | None:
-    """line_items: [{"id": ..., "label": "Unit Name: Task Name"}, ...].
-
-    Asks Claude which single task (if any) this purchase was most likely
-    for, based on the actual items purchased — more accurate than
-    keyword/cost_group matching since receipt line items ("2x4x8 Lumber")
-    rarely spell out the trade/phase name in the SOW task ("Framing").
-    Returns None (no assignment) rather than guessing when nothing is a
-    clear match — a wrong task assignment quietly corrupts that task's
-    cost variance, which is worse than leaving it unassigned for a human
-    to confirm.
-    """
-    if not line_items:
-        return None
-
-    label_to_id = {item["label"]: item["id"] for item in line_items}
-    options_text = "\n".join(f"- {label}" for label in label_to_id)
-
-    client = get_anthropic_client()
-    message = client.messages.create(
-        model=get_model(),
-        max_tokens=1024,
-        system=(
-            "You are matching a hardware/materials store receipt to the "
-            "single scope-of-work task it was most likely purchased for, "
-            "out of a fixed list of candidate tasks. Only match if the "
-            "purchased items clearly relate to one specific task on the "
-            "list — if the receipt is generic, ambiguous, or could "
-            "plausibly apply to several tasks, return null rather than "
-            "guessing. A receipt never says which unit it's for, so if "
-            "similar work exists in more than one unit (e.g. a kitchen in "
-            "Unit 2 and another in Unit 3), or the items span several "
-            "different jobs, return null — a wrong unit is worse than "
-            "leaving it for the PM to assign."
-        ),
-        tools=[MATCH_LINE_ITEM_TOOL],
-        tool_choice={"type": "tool", "name": "record_task_match"},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Receipt:\n{receipt_text}\n\n"
-                    f"Candidate tasks:\n{options_text}"
-                ),
-            }
-        ],
-    )
-    tool_use = next(block for block in message.content if block.type == "tool_use")
-    matched_label = tool_use.input.get("matched_label")
-    return label_to_id.get(matched_label)
 
 
 def extract_amount_hint(text: str) -> float | None:

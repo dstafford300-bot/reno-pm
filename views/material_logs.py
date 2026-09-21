@@ -1,7 +1,6 @@
 import streamlit as st
 
 from db.connection import get_supabase_client
-from services.db_writer import get_line_items_with_labels
 from utils.mobile import inject_mobile_button_css, inject_mobile_card_css
 
 
@@ -33,7 +32,7 @@ def render():
             supabase.table("material_logs")
             .select(
                 "id, store, amount, purchase_date, receipt_details, photo_url, "
-                "source, line_items_json, line_item_id"
+                "source, line_items_json, unit_id, line_item_id"
             )
             .eq("property_id", property_id)
             .order("purchase_date", desc=True)
@@ -48,13 +47,25 @@ def render():
         )
         return
 
-    try:
-        task_label_by_id = {
-            row["id"]: row["label"]
-            for row in get_line_items_with_labels(supabase, property_id)
+    # A purchase's unit is its own unit_id, or (older rows) its task's unit.
+    unit_name_by_id = {
+        u["id"]: u["unit_name"]
+        for u in supabase.table("units")
+        .select("id, unit_name")
+        .eq("property_id", property_id)
+        .execute()
+        .data
+    }
+    task_unit_by_id = {}
+    if unit_name_by_id:
+        task_unit_by_id = {
+            i["id"]: i["unit_id"]
+            for i in supabase.table("line_items")
+            .select("id, unit_id")
+            .in_("unit_id", list(unit_name_by_id))
+            .execute()
+            .data
         }
-    except Exception:
-        task_label_by_id = {}
 
     total_spent = sum(log.get("amount") or 0 for log in logs)
     st.metric("Total Materials Logged", f"${total_spent:,.2f}")
@@ -74,9 +85,11 @@ def render():
             with col_info:
                 st.markdown(f"**{log['store']}** — ${log['amount']:,.2f}")
                 st.caption(f"{log.get('purchase_date') or ''} · via {log.get('source')}")
-                task_label = task_label_by_id.get(log.get("line_item_id"))
-                if task_label:
-                    st.caption(f"🔧 {task_label}")
+                unit_name = unit_name_by_id.get(
+                    log.get("unit_id") or task_unit_by_id.get(log.get("line_item_id"))
+                )
+                if unit_name:
+                    st.caption(f"📍 {unit_name}")
                 if log.get("receipt_details"):
                     st.caption(log["receipt_details"][:300])
                 for li in log.get("line_items_json") or []:
