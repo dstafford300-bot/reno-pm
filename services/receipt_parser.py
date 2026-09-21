@@ -239,7 +239,11 @@ def match_line_item_from_receipt(
             "purchased items clearly relate to one specific task on the "
             "list — if the receipt is generic, ambiguous, or could "
             "plausibly apply to several tasks, return null rather than "
-            "guessing."
+            "guessing. A receipt never says which unit it's for, so if "
+            "similar work exists in more than one unit (e.g. a kitchen in "
+            "Unit 2 and another in Unit 3), or the items span several "
+            "different jobs, return null — a wrong unit is worse than "
+            "leaving it for the PM to assign."
         ),
         tools=[MATCH_LINE_ITEM_TOOL],
         tool_choice={"type": "tool", "name": "record_task_match"},
