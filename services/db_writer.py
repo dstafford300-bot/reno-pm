@@ -79,14 +79,21 @@ def check_line_item_overrun(supabase: Client, line_item_id: str) -> dict | None:
     (overrun_alerted) so this fires exactly once per task rather than on
     every subsequent purchase, and returns the context needed to send a
     Telegram alert. Returns None if not over threshold, already alerted,
-    or the task has no budgeted_cost to compare against.
+    the task has no budgeted_cost to compare against, or — most
+    importantly — its budget doesn't include materials
+    (budget_includes_materials): most SOW budgets are labor only, so
+    comparing material receipts to them is meaningless and produces
+    false alarms.
 
     Call this right after logging or (re)assigning a material purchase to
     a line_item_id — see views/budget.py and services/email_receipts.py.
     """
     rows = (
         supabase.table("line_items")
-        .select("id, task_name, unit_id, budgeted_cost, overrun_alerted")
+        .select(
+            "id, task_name, unit_id, budgeted_cost, overrun_alerted, "
+            "budget_includes_materials"
+        )
         .eq("id", line_item_id)
         .execute()
         .data
@@ -94,6 +101,8 @@ def check_line_item_overrun(supabase: Client, line_item_id: str) -> dict | None:
     if not rows:
         return None
     item = rows[0]
+    if not item.get("budget_includes_materials"):
+        return None
     if item.get("overrun_alerted"):
         return None
     budgeted = item.get("budgeted_cost") or 0
@@ -179,9 +188,13 @@ def get_line_items_with_labels(supabase: Client, property_id: str) -> list[dict]
 
 
 def get_line_item_cost_variance(supabase: Client, property_id: str) -> list[dict]:
-    """For every line item under this property, compares budgeted_cost
-    against actual material spend logged against it (material_logs rows
-    with a matching line_item_id). Purchases with no line_item_id
+    """For every line item whose budget INCLUDES materials
+    (budget_includes_materials — e.g. a roof quoted as labor and
+    materials), compares budgeted_cost against actual material spend
+    logged against it (material_logs rows with a matching line_item_id).
+    Labor-only tasks are deliberately excluded: their budget doesn't cover
+    materials, so a comparison would be meaningless — see
+    get_materials_spend_by_task for those. Purchases with no line_item_id
     (unassigned) aren't counted against any task's variance — they show
     up separately so the PM can assign them.
 
@@ -203,11 +216,12 @@ def get_line_item_cost_variance(supabase: Client, property_id: str) -> list[dict
 
     line_items = (
         supabase.table("line_items")
-        .select("id, unit_id, task_name, budgeted_cost")
+        .select("id, unit_id, task_name, budgeted_cost, budget_includes_materials")
         .in_("unit_id", unit_ids)
         .execute()
         .data
     )
+    line_items = [i for i in line_items if i.get("budget_includes_materials")]
     if not line_items:
         return []
 
@@ -243,6 +257,72 @@ def get_line_item_cost_variance(supabase: Client, property_id: str) -> list[dict
         )
     results.sort(key=lambda r: r["variance"])
     return results
+
+
+def get_materials_spend_by_task(supabase: Client, property_id: str) -> list[dict]:
+    """Material spend per task for every task with at least one purchase
+    assigned to it — WITHOUT any budget comparison. Materials are logged
+    as materials; this is just "what was bought for which task" for
+    reference. Returns [{"line_item_id", "task_name", "unit_name",
+    "spent", "includes_materials"}], biggest spend first."""
+    units = (
+        supabase.table("units")
+        .select("id, unit_name")
+        .eq("property_id", property_id)
+        .execute()
+        .data
+    )
+    unit_ids = [u["id"] for u in units]
+    unit_name_by_id = {u["id"]: u["unit_name"] for u in units}
+    if not unit_ids:
+        return []
+
+    line_items = (
+        supabase.table("line_items")
+        .select("id, unit_id, task_name, budget_includes_materials")
+        .in_("unit_id", unit_ids)
+        .execute()
+        .data
+    )
+    item_by_id = {i["id"]: i for i in line_items}
+
+    logs = (
+        supabase.table("material_logs")
+        .select("line_item_id, amount")
+        .eq("property_id", property_id)
+        .not_.is_("line_item_id", "null")
+        .execute()
+        .data
+    )
+    spent_by_item: dict[str, float] = {}
+    for log in logs:
+        spent_by_item[log["line_item_id"]] = (
+            spent_by_item.get(log["line_item_id"], 0) + (log.get("amount") or 0)
+        )
+
+    results = [
+        {
+            "line_item_id": item_id,
+            "task_name": item_by_id[item_id]["task_name"],
+            "unit_name": unit_name_by_id.get(item_by_id[item_id]["unit_id"]),
+            "spent": spent,
+            "includes_materials": bool(item_by_id[item_id].get("budget_includes_materials")),
+        }
+        for item_id, spent in spent_by_item.items()
+        if item_id in item_by_id and spent
+    ]
+    results.sort(key=lambda r: r["spent"], reverse=True)
+    return results
+
+
+def set_budget_includes_materials(
+    supabase: Client, line_item_ids: list[str], value: bool
+) -> None:
+    if not line_item_ids:
+        return
+    supabase.table("line_items").update({"budget_includes_materials": value}).in_(
+        "id", line_item_ids
+    ).execute()
 
 
 def create_draw_milestone(

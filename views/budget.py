@@ -12,10 +12,12 @@ from services.db_writer import (
     delete_draw_milestone,
     get_line_item_cost_variance,
     get_line_items_with_labels,
+    get_materials_spend_by_task,
     get_milestone_task_progress,
     log_activity,
     milestone_is_eligible,
     release_draw_milestone,
+    set_budget_includes_materials,
 )
 from services.email_receipts import sync_email_receipts
 from services.receipt_parser import (
@@ -145,10 +147,34 @@ def render():
     pending = [m for m in milestones if m.get("status") != "Released"]
     next_milestone = pending[0] if pending else None
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Budgeted SOW Cost", f"${total_budgeted:,.0f}")
-    col2.metric("Total Funds Released", f"${total_released:,.0f}")
-    col3.metric(
+    try:
+        materials_total = sum(
+            log.get("amount") or 0
+            for log in supabase.table("material_logs")
+            .select("amount")
+            .eq("property_id", property_id)
+            .execute()
+            .data
+        )
+    except Exception:
+        materials_total = None
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric(
+        "SOW Budget",
+        f"${total_budgeted:,.0f}",
+        help=(
+            "Labor for most tasks. Tasks quoted as labor AND materials "
+            "(e.g. a roof) include materials — mark those below."
+        ),
+    )
+    col2.metric(
+        "Materials Logged",
+        f"${materials_total:,.0f}" if materials_total is not None else "—",
+        help="Material purchases, tracked separately from the SOW labor budget.",
+    )
+    col3.metric("Total Funds Released", f"${total_released:,.0f}")
+    col4.metric(
         "Next Upcoming Draw",
         f"${next_milestone['draw_amount']:,.0f}" if next_milestone else "—",
         help=next_milestone["milestone_name"] if next_milestone else None,
@@ -156,35 +182,43 @@ def render():
 
     st.divider()
 
-    st.subheader("📊 Cost Variance by Task")
+    st.subheader("🧾 Materials by Task")
     st.caption(
-        "Compares each task's budgeted cost against material purchases "
-        "logged against it. Tasks with no purchases assigned yet aren't "
-        "shown — assign purchases to tasks below or from the receipt "
-        "import flow."
+        "Materials are tracked as materials, separate from the SOW budget "
+        "(which is labor, except tasks marked below as labor + materials). "
+        "This shows what was bought for each task — only labor + materials "
+        "tasks are compared against a budget."
     )
     variance_migration_missing = False
+    spend_rows = []
+    variance_by_id = {}
     try:
-        variance_rows = get_line_item_cost_variance(supabase, property_id)
+        spend_rows = get_materials_spend_by_task(supabase, property_id)
+        variance_by_id = {
+            r["line_item_id"]: r
+            for r in get_line_item_cost_variance(supabase, property_id)
+        }
     except Exception:
-        variance_rows = []
         variance_migration_missing = True
         st.caption(
-            "Run scripts/migration_material_line_item.sql via Supabase's "
-            "SQL Editor to enable task-level cost tracking."
+            "Run scripts/migration_material_line_item.sql and "
+            "scripts/migration_budget_includes_materials.sql via Supabase's "
+            "SQL Editor to enable task-level material tracking."
         )
-    if variance_rows:
-        for row in variance_rows:
-            over = row["variance"] < 0
-            label = f"**{row['unit_name']}: {row['task_name']}**"
-            cols = st.columns([3, 1, 1, 1])
-            cols[0].markdown(label)
-            cols[1].caption(f"Budgeted ${row['budgeted_cost']:,.0f}")
-            cols[2].caption(f"Spent ${row['spent']:,.0f}")
-            if over:
-                cols[3].error(f"−${abs(row['variance']):,.0f}")
-            else:
-                cols[3].success(f"+${row['variance']:,.0f}")
+    if spend_rows:
+        for row in spend_rows:
+            cols = st.columns([3, 1, 1.4, 1])
+            cols[0].markdown(f"**{row['unit_name']}: {row['task_name']}**")
+            cols[1].caption(f"Spent ${row['spent']:,.0f}")
+            budget_row = variance_by_id.get(row["line_item_id"])
+            if budget_row:
+                cols[2].caption(
+                    f"Budget (labor + materials) ${budget_row['budgeted_cost']:,.0f}"
+                )
+                if budget_row["variance"] < 0:
+                    cols[3].error(f"−${abs(budget_row['variance']):,.0f}")
+                else:
+                    cols[3].success(f"+${budget_row['variance']:,.0f}")
     elif not variance_migration_missing:
         st.caption("No purchases have been assigned to a task yet.")
 
@@ -224,6 +258,51 @@ def render():
                         assign_material_log_line_item(supabase, log["id"], chosen_id)
                         _fire_overrun_alert_if_crossed(supabase, chosen_id)
                         st.rerun()
+
+    if not variance_migration_missing:
+        with st.expander("⚙️ Tasks whose budget includes materials"):
+            st.caption(
+                "Most SOW budgets are labor only. Mark tasks quoted as "
+                "labor AND materials (e.g. a roof) so their material "
+                "purchases are compared against the budget and can trigger "
+                "overrun alerts. Everything else is just logged as materials."
+            )
+            label_by_id = {row["id"]: row["label"] for row in line_item_labels}
+            flagged_ids = (
+                {
+                    i["id"]
+                    for i in supabase.table("line_items")
+                    .select("id")
+                    .in_("unit_id", unit_ids)
+                    .eq("budget_includes_materials", True)
+                    .execute()
+                    .data
+                }
+                if unit_ids
+                else set()
+            )
+            chosen_labels = st.multiselect(
+                "Labor + materials tasks",
+                [row["label"] for row in line_item_labels],
+                default=[label_by_id[i] for i in flagged_ids if i in label_by_id],
+                key=f"materials_budget_{property_id}",
+                disabled=is_archived,
+            )
+            if st.button(
+                "Save",
+                key=f"save_materials_budget_{property_id}",
+                disabled=is_archived,
+            ):
+                chosen_ids = [
+                    row["id"] for row in line_item_labels if row["label"] in chosen_labels
+                ]
+                other_ids = [
+                    row["id"] for row in line_item_labels if row["id"] not in chosen_ids
+                ]
+                set_budget_includes_materials(supabase, chosen_ids, True)
+                set_budget_includes_materials(supabase, other_ids, False)
+                st.success("Saved.")
+                st.rerun()
 
     st.divider()
 
