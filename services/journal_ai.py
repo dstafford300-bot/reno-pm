@@ -14,13 +14,12 @@ RELEVANCE_TOOL = {
                 "items": {"type": "integer"},
                 "description": (
                     "0-based indices (from the provided list) of messages "
-                    "that are genuine progress notes, field updates, "
-                    "questions/decisions about the work, or photos — worth "
-                    "logging. Exclude greetings, small talk, logistics "
-                    "chatter unrelated to the work itself, or messages with "
-                    "no informational value. When in doubt about a photo, "
-                    "keep it — a picture from the job site is inherently "
-                    "useful visual record even without caption text."
+                    "worth keeping: text that states a project fact "
+                    "(progress, a problem, a decision, a spec/cost/date), "
+                    "and every photo. Exclude questions, requests, "
+                    "greetings, acknowledgements and conversational "
+                    "back-and-forth — when in doubt about text, leave it "
+                    "out."
                 ),
             },
         },
@@ -28,17 +27,25 @@ RELEVANCE_TOOL = {
     },
 }
 
-SYSTEM_PROMPT = """You are Jeeves, an assistant reviewing a day's messages from a \
-construction job-site Telegram group to decide what belongs in the official \
-Project Journal.
+SYSTEM_PROMPT = """You are Jeeves, deciding what belongs in the official Project \
+Journal from a construction job-site Telegram group. The journal is a record of \
+PERTINENT project information only — not a chat log. Be strict: when in doubt \
+about a text message, leave it out.
 
-Keep: genuine field/progress notes, decisions, problems encountered, questions \
-about the work, and any photo (a job-site photo is valuable on its own even \
-without much caption text).
+Keep ONLY text that states project facts: work completed or started, a problem \
+or defect found, a decision made, a measurement/spec/material/cost detail, a \
+delivery or inspection date, or access/site information someone will need later. \
+A message must be useful to someone reading the journal weeks from now.
 
-Discard: greetings, small talk, scheduling logistics unrelated to the work \
-itself ("running 10 min late"), acknowledgements ("ok", "thanks", "sounds \
-good"), or anything with no informational value about the project.
+Discard: questions and requests ("can you send the schedule?", "is a lock box \
+there?"), greetings, thanks, acknowledgements ("ok", "will do", "sounds good"), \
+back-and-forth negotiation, scheduling chatter, opinions, and anything that only \
+makes sense as part of a live conversation. A question is NOT a project fact, \
+even if it's about the work. Messages from the property manager asking or \
+instructing are usually conversation, not records — keep one only if it states a \
+fact or decision (e.g. "Stove for unit 3 is being delivered Oct 9th").
+
+Photos: keep every photo — a job-site picture is a valuable record by itself.
 
 Call the classify_journal_relevance tool with the indices of messages worth \
 keeping. Do not include any commentary outside of the tool call."""

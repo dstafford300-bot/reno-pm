@@ -109,18 +109,55 @@ def render():
         )
         return
 
+    # A burst of photos from one person (Telegram sends an album as separate
+    # messages) is one visit's worth of pictures — show it as one gallery
+    # card instead of dozens of near-identical entries.
+    groups: list[list[dict]] = []
     for entry in entries:
+        if (
+            groups
+            and entry.get("photo_file_id")
+            and not entry.get("message_text")
+            and groups[-1][0].get("photo_file_id")
+            and not groups[-1][0].get("message_text")
+            and groups[-1][0]["author_name"] == entry["author_name"]
+            and abs(
+                (
+                    datetime.fromisoformat(groups[-1][-1]["posted_at"])
+                    - datetime.fromisoformat(entry["posted_at"])
+                ).total_seconds()
+            )
+            <= 600
+        ):
+            groups[-1].append(entry)
+        else:
+            groups.append([entry])
+
+    for group in groups:
+        entry = group[0]
         posted = datetime.fromisoformat(entry["posted_at"])
         with st.container(border=True):
             st.caption(f"{posted.strftime('%b %-d, %Y — %I:%M %p')} · {entry['author_name']}")
             if entry.get("message_text"):
                 st.markdown(html.escape(entry["message_text"]))
-            if entry.get("photo_file_id"):
-                photo_url = get_file_url(entry["photo_file_id"])
-                if photo_url:
-                    st.image(photo_url)
-                else:
-                    st.caption("📷 Photo attached (couldn't be loaded)")
+            photo_urls = [
+                url
+                for url in (
+                    get_file_url(g["photo_file_id"])
+                    for g in group
+                    if g.get("photo_file_id")
+                )
+                if url
+            ]
+            if len(group) > 1:
+                st.caption(f"📷 {len(group)} photos")
+            if photo_urls:
+                for row_start in range(0, len(photo_urls), 3):
+                    cols = st.columns(3)
+                    for col, url in zip(cols, photo_urls[row_start : row_start + 3]):
+                        col.image(url)
+            elif any(g.get("photo_file_id") for g in group):
+                st.caption("📷 Photo attached (couldn't be loaded)")
 
             linked_name = line_item_name_by_id.get(entry.get("linked_line_item_id"))
             link_options = ["(none)"] + [item["task_name"] for item in line_items]
@@ -141,5 +178,6 @@ def render():
                     new_id = next(
                         item["id"] for item in line_items if item["task_name"] == choice
                     )
-                link_journal_entry_to_line_item(supabase, entry["id"], new_id)
+                for g in group:
+                    link_journal_entry_to_line_item(supabase, g["id"], new_id)
                 st.rerun()
