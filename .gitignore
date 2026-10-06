@@ -15,3 +15,7 @@ logs/
 
 # Local Claude Code tooling config (not part of the app)
 .claude/
+
+# New app front end
+web/node_modules/
+web/dist/

@@ -1,4 +1,5 @@
-import streamlit as st
+from functools import lru_cache
+
 from anthropic import Anthropic
 
 from utils.settings import get_setting
@@ -6,14 +7,13 @@ from utils.settings import get_setting
 DEFAULT_MODEL = "claude-sonnet-5"
 
 
-@st.cache_resource
+@lru_cache(maxsize=1)
 def get_anthropic_client() -> Anthropic:
     api_key = get_setting("ANTHROPIC_API_KEY")
     if not api_key:
-        st.error(
+        raise RuntimeError(
             "Missing ANTHROPIC_API_KEY. Add it to your .env file to use AI features."
         )
-        st.stop()
     return Anthropic(api_key=api_key)
 
 
