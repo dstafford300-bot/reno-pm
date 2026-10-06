@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
-from api.common import assert_writable, get_property, property_units_and_items
+from api.common import assert_writable, get_property, property_units_and_items, run_parallel
 from api.security import assert_property_access, owner_only, owner_or_pm
 from db.connection import get_supabase_client
 from services.db_writer import (
@@ -57,6 +57,63 @@ def _fire_overrun_alert(db: Client, unit_id: str | None) -> None:
         ).start()
 
 
+def _spend_by_unit(units, items, logs):
+    """(per-unit spend rows, unassigned total) from rows already fetched —
+    a purchase belongs to its own unit_id, or (older rows) its task's unit."""
+    task_unit = {i["id"]: i["unit_id"] for i in items}
+    name = {u["id"]: u["unit_name"] for u in units}
+    by_unit: dict[str, dict] = {}
+    for log in logs:
+        unit = log.get("unit_id") or task_unit.get(log.get("line_item_id"))
+        if unit:
+            e = by_unit.setdefault(unit, {"spent": 0.0, "count": 0})
+            e["spent"] += float(log.get("amount") or 0)
+            e["count"] += 1
+    budget: dict[str, float] = {}
+    for i in items:
+        if i.get("budget_includes_materials"):
+            budget[i["unit_id"]] = budget.get(i["unit_id"], 0) + (i.get("budgeted_cost") or 0)
+    rows = []
+    for unit_id, e in by_unit.items():
+        b = budget.get(unit_id)
+        rows.append({
+            "unit_id": unit_id, "unit_name": name.get(unit_id, "Unknown unit"),
+            "spent": e["spent"], "count": e["count"],
+            "labor_plus_materials_budget": b if b else None,
+            "variance": (b - e["spent"]) if b else None,
+        })
+    rows.sort(key=lambda r: r["spent"], reverse=True)
+    return rows
+
+
+def _milestone_progress(db: Client, milestones: list[dict], items: list[dict]) -> None:
+    """Fills task_progress/eligible on every milestone with ONE query for all
+    their task requirements (the per-milestone version made ~2 queries each)."""
+    if not milestones:
+        return
+    reqs = (
+        db.table("draw_milestone_tasks")
+        .select("milestone_id, line_item_id, required_percent")
+        .in_("milestone_id", [m["id"] for m in milestones])
+        .execute()
+        .data
+    )
+    by_item = {i["id"]: i for i in items}
+    for m in milestones:
+        progress = []
+        for r in reqs:
+            item = by_item.get(r["line_item_id"])
+            if r["milestone_id"] == m["id"] and item:
+                progress.append({
+                    "line_item_id": r["line_item_id"], "task_name": item["task_name"],
+                    "required_percent": float(r["required_percent"]),
+                    "actual_percent": float(item.get("percent_complete") or 0),
+                })
+        m["task_progress"] = progress
+        m["eligible"] = milestone_is_eligible(progress)
+        m["draw_amount"] = float(m["draw_amount"] or 0)
+
+
 @router.get("/properties/{property_id}/budget")
 def get_budget(
     property_id: str,
@@ -64,57 +121,40 @@ def get_budget(
     db: Client = Depends(get_supabase_client),
 ):
     assert_property_access(db, user, property_id)
-    prop = get_property(db, property_id, "id, property_name, archived")
-    units, items = property_units_and_items(
-        db, property_id, "id, unit_id, task_name, budgeted_cost, budget_includes_materials"
+
+    def fetch_units_items():
+        return property_units_and_items(
+            db, property_id,
+            "id, unit_id, task_name, budgeted_cost, budget_includes_materials, percent_complete",
+        )
+
+    (units, items), prop, milestones, logs = run_parallel(
+        fetch_units_items,
+        lambda: get_property(db, property_id, "id, property_name, archived"),
+        lambda: db.table("draw_milestones")
+            .select("id, milestone_name, draw_amount, status, released_at")
+            .eq("property_id", property_id).order("created_at").execute().data,
+        lambda: db.table("material_logs")
+            .select("id, store, amount, purchase_date, unit_id, line_item_id")
+            .eq("property_id", property_id).order("purchase_date", desc=True).execute().data,
     )
     unit_name = {u["id"]: u["unit_name"] for u in units}
-
-    milestones = (
-        db.table("draw_milestones")
-        .select("id, milestone_name, draw_amount, status, released_at")
-        .eq("property_id", property_id)
-        .order("created_at")
-        .execute()
-        .data
-    )
-    for m in milestones:
-        m["task_progress"] = get_milestone_task_progress(db, m["id"])
-        m["eligible"] = milestone_is_eligible(m["task_progress"])
-        m["draw_amount"] = float(m["draw_amount"] or 0)
+    _milestone_progress(db, milestones, items)
 
     released = sum(m["draw_amount"] for m in milestones if m["status"] == "Released")
     pending = [m for m in milestones if m["status"] != "Released"]
-
-    logs = (
-        db.table("material_logs")
-        .select("id, store, amount, purchase_date, unit_id, line_item_id")
-        .eq("property_id", property_id)
-        .order("purchase_date", desc=True)
-        .execute()
-        .data
-    )
     needs_unit = [
         {
-            "id": l["id"],
-            "store": l["store"],
-            "amount": float(l["amount"] or 0),
+            "id": l["id"], "store": l["store"], "amount": float(l["amount"] or 0),
             "purchase_date": (l.get("purchase_date") or "")[:10],
         }
         for l in logs
         if not l.get("unit_id") and not l.get("line_item_id")
     ]
-    budget_by_unit = {r["unit_id"]: r for r in get_unit_budget_comparison(db, property_id)}
-    spend = get_materials_spend_by_unit(db, property_id)
-    for row in spend["units"]:
-        b = budget_by_unit.get(row["unit_id"])
-        row["labor_plus_materials_budget"] = b["budgeted_cost"] if b else None
-        row["variance"] = b["variance"] if b else None
 
     return {
         "property": {
-            "id": prop["id"],
-            "property_name": prop["property_name"],
+            "id": prop["id"], "property_name": prop["property_name"],
             "archived": bool(prop.get("archived")),
         },
         "total_budget": sum(i.get("budgeted_cost") or 0 for i in items),
@@ -125,7 +165,7 @@ def get_budget(
             if pending else None
         ),
         "milestones": milestones,
-        "materials_by_unit": spend["units"],
+        "materials_by_unit": _spend_by_unit(units, items, logs),
         "needs_unit": needs_unit,
         "units": [{"id": u["id"], "unit_name": u["unit_name"]} for u in units],
         "tasks": [

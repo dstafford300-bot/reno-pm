@@ -65,3 +65,14 @@ __all__ = [
     "parse_iso_date",
     "property_units_and_items",
 ]
+
+
+def run_parallel(*calls):
+    """Runs independent callables concurrently and returns their results in
+    order. The database round-trip dominates request time, so overlapping
+    independent queries is what keeps screens fast."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        futures = [pool.submit(c) for c in calls]
+        return [f.result() for f in futures]

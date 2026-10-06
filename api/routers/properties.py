@@ -61,9 +61,24 @@ def list_properties(
     if allowed is not None:
         props = [p for p in props if p["id"] in allowed]
 
+    # One query for every task across all properties (joined to its unit's
+    # property) rather than units + tasks per property.
+    ids = [p["id"] for p in props]
+    all_items = (
+        db.table("line_items")
+        .select("id, status, budgeted_cost, units!inner(property_id)")
+        .in_("units.property_id", ids)
+        .execute()
+        .data
+        if ids else []
+    )
+    items_by_property: dict[str, list] = {}
+    for item in all_items:
+        items_by_property.setdefault(item["units"]["property_id"], []).append(item)
+
     out = []
     for p in props:
-        units, items = property_units_and_items(db, p["id"], "id, status, budgeted_cost")
+        items = items_by_property.get(p["id"], [])
         row = {
             "id": p["id"],
             "property_name": p["property_name"],

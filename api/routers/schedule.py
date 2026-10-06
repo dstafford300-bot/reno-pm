@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
-from api.common import assert_writable, get_property, property_units_and_items
+from api.common import assert_writable, get_property, property_units_and_items, run_parallel
 from api.security import (
     any_user,
     assert_property_access,
@@ -41,18 +41,15 @@ def get_schedule(
     db: Client = Depends(get_supabase_client),
 ):
     assert_property_access(db, user, property_id)
-    prop = get_property(db, property_id, "id, property_name, archived")
-    units, items = property_units_and_items(db, property_id, _TASK_COLUMNS)
-    unit_name = {u["id"]: u["unit_name"] for u in units}
-
-    pending_requests = (
-        db.table("change_requests")
-        .select("line_item_id")
-        .eq("property_id", property_id)
-        .eq("status", "pending")
-        .execute()
-        .data
+    (units, items), prop, pending_requests, pending_publish = run_parallel(
+        lambda: property_units_and_items(db, property_id, _TASK_COLUMNS),
+        lambda: get_property(db, property_id, "id, property_name, archived"),
+        lambda: db.table("change_requests").select("line_item_id")
+            .eq("property_id", property_id).eq("status", "pending").execute().data,
+        lambda: db.table("pending_schedule_changes").select("id", count="exact")
+            .eq("property_id", property_id).execute().count or 0,
     )
+    unit_name = {u["id"]: u["unit_name"] for u in units}
     awaiting = {r["line_item_id"] for r in pending_requests}
 
     tasks = [
@@ -66,14 +63,6 @@ def get_schedule(
         }
         for item in items
     ]
-    pending_publish = (
-        db.table("pending_schedule_changes")
-        .select("id", count="exact")
-        .eq("property_id", property_id)
-        .execute()
-        .count
-        or 0
-    )
     return {
         "property": {
             "id": prop["id"],
