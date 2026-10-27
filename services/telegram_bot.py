@@ -251,39 +251,37 @@ PM_DIGEST_VERIFICATION_PHRASE = "Jeeves PM Summary"
 
 
 def format_daily_digest_message(property_summaries: list[dict]) -> str:
-    """property_summaries: [{"property_name": ..., "action_items": [str, ...],
-    "activity_lines": [str, ...]}] for properties with either — properties
-    with neither are omitted entirely rather than shown as an empty
-    section. action_items (already-prefixed with their own icon, e.g.
-    "⚠️ Overdue: ...") render first under a dedicated heading so they
-    can't get lost among routine activity notes."""
-    if not property_summaries:
-        return (
-            "🎩 <b>Good day, sir.</b> Jeeves here with your daily summary.\n\n"
-            "A quiet day across every property — nothing to report."
-        )
+    """One short morning message. Per property: what's NEW needing attention
+    (capped), a one-line count of items still open from before, and the
+    last 24 hours of activity (capped). Nothing new and nothing carried
+    over collapses to a single line."""
+    def capped(lines, limit, noun):
+        shown = [f"  • {html.escape(l)}" for l in lines[:limit]]
+        if len(lines) > limit:
+            shown.append(f"  … and {len(lines) - limit} more {noun}")
+        return shown
 
     sections = []
     for prop in property_summaries:
+        new = prop.get("action_items") or []
+        carried = prop.get("carried_over") or 0
+        activity = prop.get("activity_lines") or []
+        if not (new or carried or activity):
+            continue
         block = [f"<b>{html.escape(prop['property_name'])}</b>"]
-        action_items = prop.get("action_items") or []
-        activity_lines = prop.get("activity_lines") or []
-        if action_items:
-            block.append("🚨 <b>Needs your attention:</b>")
-            block.extend(f"  • {html.escape(line)}" for line in action_items)
-        if activity_lines:
-            if action_items:
-                block.append("")
-            block.append("📋 <b>Last 24 hours:</b>")
-            block.extend(f"  • {html.escape(line)}" for line in activity_lines)
+        if new:
+            block.append("🚨 New:")
+            block.extend(capped(new, 4, "new"))
+        if carried:
+            block.append(f"⏳ {carried} item(s) still open from before — nothing new on them")
+        if activity:
+            block.append("📋 Yesterday:")
+            block.extend(capped(activity, 3, "updates"))
         sections.append("\n".join(block))
 
-    body = "\n\n".join(sections)
-    return (
-        "🎩 <b>Good day, sir.</b> Jeeves here with your daily summary "
-        "across all properties.\n\n"
-        f"{body}"
-    )
+    if not sections:
+        return "🎩 Good morning, sir. All quiet — nothing new to report."
+    return "🎩 <b>Good morning, sir.</b>\n\n" + "\n\n".join(sections)[:3500]
 
 
 def send_daily_digest(text: str, chat_id: str) -> bool:

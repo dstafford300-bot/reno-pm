@@ -4,7 +4,9 @@ alerts) summarizing schedule changes, draw releases, journal activity,
 and material purchases across every property.
 """
 
-from datetime import date, datetime, timedelta, timezone
+import json
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from supabase import Client
 
@@ -16,6 +18,8 @@ from services.db_writer import (
 from services.telegram_bot import format_daily_digest_message, send_daily_digest
 
 _PM_CHAT_KEY = "pm_digest_chat_id"
+_SEEN_KEY = "pm_digest_seen"
+LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 
 
 def get_pm_chat_id(client: Client) -> str | None:
@@ -83,7 +87,7 @@ def build_action_items(client: Client, property_id: str) -> list[str]:
         )
         unit_ids = [u["id"] for u in units]
         if unit_ids:
-            today = date.today().isoformat()
+            today = datetime.now(LOCAL_TZ).date().isoformat()
             overdue = (
                 client.table("line_items")
                 .select("task_name, estimated_end_date, status")
@@ -187,18 +191,42 @@ def build_daily_digest(client: Client, hours: int = 24) -> list[dict]:
         pid: build_action_items(client, pid) for pid in property_names
     }
 
+    # Only things not already reported yesterday are listed; the rest are a
+    # single "still open" count, so the message stays short however long a
+    # backlog gets.
+    seen = _load_seen(client)
     all_property_ids = set(lines_by_property) | {
         pid for pid, items in action_items_by_property.items() if items
     }
 
-    return [
-        {
+    out = []
+    for pid in all_property_ids:
+        items = action_items_by_property.get(pid, [])
+        new = [i for i in items if i not in seen]
+        out.append({
             "property_name": property_names[pid],
-            "action_items": action_items_by_property.get(pid, []),
+            "action_items": new,
+            "carried_over": len(items) - len(new),
             "activity_lines": lines_by_property.get(pid, []),
-        }
-        for pid in all_property_ids
-    ]
+            "_all_items": items,
+        })
+    return sorted(out, key=lambda x: x["property_name"])
+
+
+def _load_seen(client: Client) -> set[str]:
+    try:
+        rows = client.table("bot_state").select("value").eq("key", _SEEN_KEY).execute().data
+        return set(json.loads(rows[0]["value"])) if rows else set()
+    except Exception:
+        return set()
+
+
+def _save_seen(client: Client, summaries: list[dict]) -> None:
+    items = sorted({i for s in summaries for i in s.get("_all_items", [])})
+    try:
+        client.table("bot_state").upsert({"key": _SEEN_KEY, "value": json.dumps(items)}).execute()
+    except Exception:
+        pass
 
 
 def send_daily_pm_digest(client: Client, hours: int = 24) -> bool:
@@ -209,4 +237,7 @@ def send_daily_pm_digest(client: Client, hours: int = 24) -> bool:
         return False
     summaries = build_daily_digest(client, hours=hours)
     text = format_daily_digest_message(summaries)
-    return send_daily_digest(text, chat_id)
+    sent = send_daily_digest(text, chat_id)
+    if sent:
+        _save_seen(client, summaries)
+    return sent

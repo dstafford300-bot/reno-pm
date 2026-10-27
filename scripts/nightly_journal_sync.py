@@ -30,7 +30,6 @@ from supabase import create_client
 
 from services.email_receipts import sync_email_receipts
 from services.inbox import prune as prune_inbox
-from services.pm_digest import send_daily_pm_digest
 from services.trade_nudges import check_and_send_trade_nudges
 
 
@@ -59,8 +58,8 @@ def main():
 
     print(f"  Inbox: cleared {prune_inbox(client)} handled message(s) older than a week")
 
-    digest_sent = send_daily_pm_digest(client)
-    print(f"  PM daily digest: {'sent' if digest_sent else 'no PM chat linked, skipped'}")
+    # The morning digest is sent by scripts/send_digest.py from the server's
+    # cron at 7am Pacific; GitHub's scheduler runs hours late and unpredictably.
 
     print(f"[{datetime.now(timezone.utc).isoformat()}] Nightly sync complete")
 
