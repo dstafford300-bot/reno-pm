@@ -210,7 +210,7 @@ def _load_context(supabase: Client):
     return "\n".join(lines), task_by_ref, draw_by_ref
 
 
-def _read_message(text: str, context: str) -> dict:
+def _read_message(text: str, context: str, conversation: str = "") -> dict:
     client = _anthropic_client()
     message = client.messages.create(
         model=_model(),
@@ -218,7 +218,9 @@ def _read_message(text: str, context: str) -> dict:
         system=UPDATE_SYSTEM_PROMPT,
         tools=[UPDATE_TOOL],
         tool_choice={"type": "tool", "name": "record_updates"},
-        messages=[{"role": "user", "content": f"{context}\n\n---\nMessage from the property manager:\n{text}"}],
+        messages=[{"role": "user", "content": (
+            f"{context}\n\n---\n{conversation}Message from the property manager:\n{text}"
+        )}],
     )
     return next(block for block in message.content if block.type == "tool_use").input
 
@@ -276,13 +278,30 @@ def _load_pending(supabase: Client, chat_id: str) -> dict | None:
     return rows[0]["changes"]
 
 
+def _conversation_so_far(existing: dict | None) -> str:
+    """What was said earlier in this same pending conversation, so a short
+    follow-up ("the flooring I meant is in unit B") can be understood
+    against the question it answers."""
+    if not existing:
+        return ""
+    earlier = existing.get("history") or []
+    asked = existing.get("unclear") or []
+    out = "This message continues a conversation still awaiting confirmation.\n"
+    if earlier:
+        out += "Earlier messages from the manager:\n" + "\n".join(f"- {m}" for m in earlier[-4:]) + "\n"
+    if asked:
+        out += "Items I asked them to clarify:\n" + "\n".join(f"- {u}" for u in asked[:8]) + "\n"
+    return out + "\n"
+
+
 def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
     """Reads a message from the owner, works out every task/draw it refers
     to, stores the proposal and returns a preview asking for confirmation.
     ALWAYS returns an answer — a DM to Jeeves is never silently ignored."""
+    existing = _load_pending(supabase, chat_id)
     try:
         context, task_by_ref, draw_by_ref = _load_context(supabase)
-        result = _read_message(text, context)
+        result = _read_message(text, context, _conversation_so_far(existing))
     except Exception as e:
         print(f"WARNING: couldn't read update message: {e}")
         return "I had trouble reading that just now, sir — could you try again in a moment?"
@@ -306,6 +325,16 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
     ]
     not_acted = list(result.get("unclear", []))
 
+    if not task_changes and not draw_changes and existing is not None:
+        existing["history"] = (existing.get("history") or []) + [text]
+        existing["unclear"] = not_acted
+        supabase.table("pending_bulk_updates").update({"changes": existing}).eq("chat_id", chat_id).execute()
+        note = "Nothing new to add from that, sir."
+        if not_acted:
+            note += " I still couldn't place:\n" + "\n".join(f"  • {html.escape(x)}" for x in not_acted[:8]) + \
+                "\n\nCould you say which?"
+        return note + "\n\n" + _preview(existing, [], False)
+
     if not task_changes and not draw_changes:
         base = "I didn't find anything to change, sir"
         if already_current:
@@ -317,7 +346,6 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
             "example “the roof is complete at 809”, or reply to the daily summary line by line."
 
     # Telegram splits long messages: fold this one into any still-pending proposal.
-    existing = _load_pending(supabase, chat_id)
     merged = existing is not None
     changes = existing or {"tasks": [], "draws": []}
     by_task = {c["line_item_id"]: c for c in changes["tasks"]}
@@ -326,7 +354,11 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
     by_draw = {d["milestone_id"]: d for d in changes["draws"]}
     for d in draw_changes:
         by_draw[d["milestone_id"]] = d
-    changes = {"tasks": list(by_task.values()), "draws": list(by_draw.values())}
+    changes = {
+        "tasks": list(by_task.values()), "draws": list(by_draw.values()),
+        "history": ((existing or {}).get("history") or []) + [text],
+        "unclear": not_acted,
+    }
 
     supabase.table("pending_bulk_updates").upsert({
         "chat_id": chat_id, "changes": changes, "summary": f"{len(changes['tasks'])} task(s), {len(changes['draws'])} draw(s)",
