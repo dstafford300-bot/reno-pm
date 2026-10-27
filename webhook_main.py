@@ -206,6 +206,17 @@ def _dispatch_jeeves(supabase: Client, update: dict) -> None:
     if kind == "photo" and allowed and is_receipt_message(shaped[0]):
         process_receipt_message(supabase, property_id, shaped[0])
         return
+    if kind == "photo" and not allowed and is_receipt_message(shaped[0]):
+        # The photo is still kept as a site photo below, but say plainly that
+        # no expense was logged so nobody assumes it was.
+        try:
+            send_telegram_message(
+                chat_id,
+                "🎩 Only approved people can log receipts, sir. I have kept the photo "
+                "in the journal, but no expense was recorded — please send it to the owner.",
+            )
+        except Exception as e:
+            print(f"WARNING: couldn't send receipt notice: {inbox.redact(repr(e))}")
 
     if kind in _MEDIA_KINDS:
         # Every photo/voice note/video is a site record: keep it, stored privately.
