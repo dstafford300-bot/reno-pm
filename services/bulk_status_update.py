@@ -1,6 +1,8 @@
-"""Bulk schedule status updates from a direct message to Jeeves — e.g.
-"the whole roof is complete at 809" marks every roof-related line item
-Completed. DM-only (never group chats), and always preview-then-confirm:
+"""Schedule and draw updates from a direct message to Jeeves — one sentence
+("the whole roof is complete at 809") or a whole reply to the daily summary:
+many tasks at different stages across both properties, in the sender's own
+wording, plus draws that were paid. DM-only (never group chats), and always
+preview-then-confirm:
 the first message proposes a match and stores it in pending_bulk_updates;
 only a subsequent "yes" actually writes anything. This exists because
 percent_complete drives draw-milestone eligibility on the Budget page —
@@ -17,10 +19,10 @@ import os
 from anthropic import Anthropic
 from supabase import Client
 
-from services.db_writer import log_activity
-from services.receipt_parser import match_property_from_text
+from services.db_writer import log_activity, release_draw_milestone
 from services.telegram_bot import send_and_pin_batch_schedule_update
 
+import html
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -76,257 +78,275 @@ def cancel_pending_update(supabase: Client, chat_id: str) -> str | None:
     return "Understood — nothing was changed."
 
 
-PARSE_REQUEST_TOOL = {
-    "name": "record_bulk_status_update",
+UPDATE_TOOL = {
+    "name": "record_updates",
     "description": (
-        "Extract a bulk task-completion update instruction from a direct "
-        "message to Jeeves, e.g. 'the whole roof is complete at 809' or "
-        "'framing in unit 2 is 50% done at Lincoln Heights'. If the "
-        "message is NOT clearly an instruction to change task completion "
-        "status (e.g. it's a question, small talk, or something else "
-        "entirely), set applicable to false and leave the other fields "
-        "null — don't guess."
+        "Record what the property manager says has happened, by referring to "
+        "the numbered tasks (T#) and unpaid draws (D#) in the provided list."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "applicable": {"type": "boolean"},
-            "property_query": {
-                "type": ["string", "null"],
-                "description": "The property name/address/number mentioned, e.g. '809'.",
+            "applicable": {
+                "type": "boolean",
+                "description": "False if the message isn't reporting task progress or draw payments at all.",
             },
-            "scope_description": {
-                "type": ["string", "null"],
-                "description": (
-                    "What the update applies to, in the sender's own words, "
-                    "e.g. 'the roof', 'framing in unit 2', 'flooring "
-                    "throughout'."
-                ),
-            },
-            "status": {
-                "type": ["string", "null"],
-                "enum": ["Pending", "In Progress", "Completed", None],
-                "description": (
-                    "Inferred from phrasing: 'complete'/'done'/'finished' "
-                    "-> Completed. 'X% done'/'halfway'/'started' -> In "
-                    "Progress. 'not started'/'reset' -> Pending."
-                ),
-            },
-            "percent": {
-                "type": ["number", "null"],
-                "description": (
-                    "0-100. 100 for Completed, 0 for Pending, the stated "
-                    "percentage for In Progress."
-                ),
-            },
-        },
-        "required": ["applicable"],
-    },
-}
-
-PARSE_SYSTEM_PROMPT = """You are Jeeves, reading a direct message from the property \
-manager to see if it's an instruction to update task completion status/percentage \
-on the schedule.
-
-Call record_bulk_status_update with the result — applicable=false if this message \
-isn't clearly that kind of instruction."""
-
-
-def _parse_request(text: str) -> dict:
-    client = _anthropic_client()
-    message = client.messages.create(
-        model=_model(),
-        max_tokens=512,
-        system=PARSE_SYSTEM_PROMPT,
-        tools=[PARSE_REQUEST_TOOL],
-        tool_choice={"type": "tool", "name": "record_bulk_status_update"},
-        messages=[{"role": "user", "content": text}],
-    )
-    tool_use = next(block for block in message.content if block.type == "tool_use")
-    return tool_use.input
-
-
-MATCH_SCOPE_TOOL = {
-    "name": "record_matched_tasks",
-    "description": (
-        "From a numbered list of candidate schedule tasks, return the "
-        "indices of every task that is clearly part of the described "
-        "scope. Be reasonably inclusive of tasks that are obviously part "
-        "of that scope, but don't include tasks that are only loosely or "
-        "ambiguously related."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "matched_indices": {
+            "task_updates": {
                 "type": "array",
-                "items": {"type": "integer"},
-            }
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string", "description": "A task reference from the list, e.g. T12."},
+                        "status": {"type": "string", "enum": ["Pending", "In Progress", "Completed"]},
+                        "percent": {
+                            "type": ["number", "null"],
+                            "description": "0-100. Only when the sender gave or clearly implied one (e.g. 'half done' = 50). Null otherwise — never invent a number.",
+                        },
+                        "evidence": {"type": "string", "description": "The words from the message this came from."},
+                    },
+                    "required": ["ref", "status", "evidence"],
+                },
+            },
+            "draw_updates": {
+                "type": "array",
+                "description": "Draws the sender says were paid / received / released.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string", "description": "A draw reference from the list, e.g. D2."},
+                        "evidence": {"type": "string"},
+                    },
+                    "required": ["ref", "evidence"],
+                },
+            },
+            "unclear": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Things mentioned that could NOT be confidently matched to a listed task/draw, "
+                    "or that aren't a status/payment (new ETAs, questions, delays). One short line each."
+                ),
+            },
         },
-        "required": ["matched_indices"],
+        "required": ["applicable", "task_updates", "draw_updates", "unclear"],
     },
 }
 
-MATCH_SYSTEM_PROMPT = """You are Jeeves, matching a described scope of work (e.g. \
-"the roof", "framing in unit 2") against a property's actual list of schedule \
-tasks, to figure out which specific tasks it refers to.
+UPDATE_SYSTEM_PROMPT = """You are Jeeves, reading a reply from the property manager — usually \
+to your daily summary — reporting what has been done on their renovation jobs. They write \
+casually, in their own words, so a task is often described by a VARIANT of its name \
+("kitchen paint" for "Kitchen paint or install new cabinets"; "the roof" for several roofing \
+tasks). Use the numbered lists to match each thing they mention.
 
-Call record_matched_tasks with the indices of every task that clearly falls within \
-that scope. Do not include commentary outside of the tool call."""
+Rules:
+- Report ONLY what the message says. "done/complete/finished/installed/paid off" -> Completed. \
+"started / working on it / X% done / halfway" -> In Progress (percent only if stated or clearly \
+implied). "not started / reset" -> Pending.
+- A scope covering several listed tasks ("the whole roof") means every task that is clearly part of it.
+- "draw (request) was paid / received / released" -> the matching draw in the DRAWS list. If it's \
+unclear WHICH draw, put it in `unclear` rather than guessing.
+- Never guess. If you can't tell which listed task a phrase means, put it in `unclear`.
+- The same kind of work often exists in several units (flooring, paint, kitchen, bathroom in both \
+Unit 2 and Unit 3). If the message doesn't say which unit and the context doesn't make it \
+obvious, DO NOT pick one — put it in `unclear` as "<what they said> — which unit?".
+- New dates/ETAs, delays, questions and opinions are not updates: list them in `unclear`.
+- If a message mentions both properties, handle each by its own tasks. If the property isn't \
+stated, use whichever property the item clearly belongs to.
+
+Call record_updates with the result."""
 
 
-def _match_scope(scope_description: str, candidates: list[dict]) -> list[dict]:
-    """candidates: [{"id", "unit_name", "task_name", "cost_group"}, ...].
-    Returns the subset that match, via one Claude call over the whole list
-    rather than one call per task."""
-    if not candidates:
-        return []
-    lines = "\n".join(
-        f"{i}. {c['unit_name']}: {c['task_name']} (cost group: {c.get('cost_group') or 'Uncategorized'})"
-        for i, c in enumerate(candidates)
-    )
+def _load_context(supabase: Client):
+    """(prompt_text, task_by_ref, draw_by_ref) covering every unarchived
+    property: its tasks with current status, and its unpaid draws. Numbered
+    refs (T1, D1…) let Claude answer by reference instead of retyping long
+    names or ids."""
+    props = [
+        p for p in supabase.table("properties").select("id, property_name, archived").order("property_name").execute().data
+        if not p.get("archived")
+    ]
+    task_by_ref: dict[str, dict] = {}
+    draw_by_ref: dict[str, dict] = {}
+    lines: list[str] = []
+    t = d = 0
+    for prop in props:
+        units = supabase.table("units").select("id, unit_name").eq("property_id", prop["id"]).execute().data
+        unit_name = {u["id"]: u["unit_name"] for u in units}
+        items = []
+        if units:
+            items = (
+                supabase.table("line_items")
+                .select("id, unit_id, task_name, cost_group, status, percent_complete")
+                .in_("unit_id", list(unit_name)).execute().data
+            )
+        lines.append(f"\nPROPERTY: {prop['property_name']}")
+        for item in items:
+            t += 1
+            ref = f"T{t}"
+            pct = float(item.get("percent_complete") or 0)
+            status = item.get("status") or "Pending"
+            task_by_ref[ref] = {
+                "line_item_id": item["id"], "property_id": prop["id"],
+                "property_name": prop["property_name"], "unit_name": unit_name.get(item["unit_id"], "?"),
+                "task_name": item["task_name"], "status": status, "percent": pct,
+            }
+            shown = f"{status} {pct:.0f}%" if status == "In Progress" else status
+            lines.append(f"  {ref} | {unit_name.get(item['unit_id'], '?')} | {item.get('cost_group') or '-'} | {item['task_name']} | now: {shown}")
+        draws = (
+            supabase.table("draw_milestones").select("id, milestone_name, draw_amount, status")
+            .eq("property_id", prop["id"]).neq("status", "Released").execute().data
+        )
+        if draws:
+            lines.append("  DRAWS NOT YET MARKED PAID:")
+        for draw in draws:
+            d += 1
+            ref = f"D{d}"
+            draw_by_ref[ref] = {
+                "milestone_id": draw["id"], "property_id": prop["id"],
+                "property_name": prop["property_name"], "name": draw["milestone_name"],
+                "amount": float(draw["draw_amount"] or 0),
+            }
+            lines.append(f"  {ref} | {draw['milestone_name']} | ${float(draw['draw_amount'] or 0):,.0f}")
+    return "\n".join(lines), task_by_ref, draw_by_ref
+
+
+def _read_message(text: str, context: str) -> dict:
     client = _anthropic_client()
     message = client.messages.create(
         model=_model(),
-        max_tokens=1024,
-        system=MATCH_SYSTEM_PROMPT,
-        tools=[MATCH_SCOPE_TOOL],
-        tool_choice={"type": "tool", "name": "record_matched_tasks"},
-        messages=[
-            {
-                "role": "user",
-                "content": f"Scope: {scope_description}\n\nCandidate tasks:\n{lines}",
-            }
-        ],
+        max_tokens=4096,
+        system=UPDATE_SYSTEM_PROMPT,
+        tools=[UPDATE_TOOL],
+        tool_choice={"type": "tool", "name": "record_updates"},
+        messages=[{"role": "user", "content": f"{context}\n\n---\nMessage from the property manager:\n{text}"}],
     )
-    tool_use = next(block for block in message.content if block.type == "tool_use")
-    indices = set(tool_use.input.get("matched_indices", []))
-    return [c for i, c in enumerate(candidates) if i in indices]
+    return next(block for block in message.content if block.type == "tool_use").input
 
 
-def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str | None:
-    """Parses a DM as a potential bulk status-update instruction, matches
-    it against the property's real tasks, and — if anything matched —
-    stores the proposal and returns a preview reply asking for
-    confirmation. Returns None if the message isn't a status-update
-    instruction at all (so the caller sends no reply and doesn't spam
-    ordinary DM chatter). Never raises."""
+def _target(current: dict, status: str, percent) -> tuple[str, float]:
+    """The (status, percent) to store — same rules as the app: Completed is
+    100, Pending is 0, In Progress keeps a stated percent, else the existing
+    one if it's genuinely partial."""
+    if status == "Completed":
+        return "Completed", 100.0
+    if status == "Pending":
+        return "Pending", 0.0
+    if percent is not None:
+        return "In Progress", max(0.0, min(100.0, float(percent)))
+    existing = float(current.get("percent") or 0)
+    return "In Progress", existing if 0 < existing < 100 else 0.0
+
+
+def _preview(changes: dict, not_acted: list[str], merged: bool) -> str:
+    esc = html.escape
+    by_prop: dict[str, dict[str, list[str]]] = {}
+    for c in changes["tasks"]:
+        sec = by_prop.setdefault(c["property_name"], {})
+        bucket = {"Completed": "✅ Complete", "In Progress": "🔧 In progress", "Pending": "⏪ Back to not started"}[c["status"]]
+        suffix = f" — {c['percent']:.0f}%" if c["status"] == "In Progress" and c["percent"] else ""
+        sec.setdefault(bucket, []).append(f"{esc(c['unit_name'])}: {esc(c['task_name'])}{suffix}")
+    for dr in changes["draws"]:
+        by_prop.setdefault(dr["property_name"], {}).setdefault("💰 Draws marked as paid", []).append(
+            f"{esc(dr['name'])} — ${dr['amount']:,.0f}")
+
+    parts = ["🎩 " + ("Added to your pending changes, sir. " if merged else "")
+             + "Here is what I shall record:"]
+    for prop, sections in by_prop.items():
+        parts.append(f"\n<b>{esc(prop)}</b>")
+        for title, entries in sections.items():
+            parts.append(f"{title} ({len(entries)}):")
+            shown = entries[:30]
+            parts += [f"  • {e}" for e in shown]
+            if len(entries) > len(shown):
+                parts.append(f"  … and {len(entries) - len(shown)} more")
+    if not_acted:
+        parts.append("\n❓ I did not act on:")
+        parts += [f"  • {esc(u)}" for u in not_acted[:8]]
+    parts.append("\nReply <b>yes</b> to apply, <b>no</b> to cancel — or send corrections or further items.")
+    return "\n".join(parts)[:3900]
+
+
+def _load_pending(supabase: Client, chat_id: str) -> dict | None:
+    rows = supabase.table("pending_bulk_updates").select("*").eq("chat_id", chat_id).execute().data
+    if not rows or not rows[0].get("changes"):
+        return None
+    created = datetime.fromisoformat(rows[0]["created_at"].replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) - created > PROPOSAL_TTL:
+        return None
+    return rows[0]["changes"]
+
+
+def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
+    """Reads a message from the owner, works out every task/draw it refers
+    to, stores the proposal and returns a preview asking for confirmation.
+    ALWAYS returns an answer — a DM to Jeeves is never silently ignored."""
     try:
-        parsed = _parse_request(text)
+        context, task_by_ref, draw_by_ref = _load_context(supabase)
+        result = _read_message(text, context)
     except Exception as e:
-        print(f"WARNING: couldn't parse bulk-update request: {e}")
+        print(f"WARNING: couldn't read update message: {e}")
         return "I had trouble reading that just now, sir — could you try again in a moment?"
-    if not parsed.get("applicable"):
-        return (
-            "I didn't take that as a schedule update, sir. To update tasks, say what's "
-            "done and where — for example “the roof is complete at 809” or “framing "
-            "in unit 2 is 50% done at 323”."
-        )
 
-    status = parsed.get("status")
-    if not status:
-        return (
-            "I understood which work you mean, but not whether it's finished, under "
-            "way (and how far), or not started. Could you say which?"
-        )
-    percent = parsed.get("percent")
-    if percent is None:
-        percent = {"Completed": 100, "Pending": 0}.get(status, 0)
-
-    properties = (
-        supabase.table("properties").select("id, property_name").execute().data
-    )
-    property_id = match_property_from_text(parsed.get("property_query") or "", properties)
-    if not property_id:
-        return (
-            "I couldn't tell which property you meant — could you include "
-            "the address or a distinctive part of it?"
-        )
-    property_name = next(
-        p["property_name"] for p in properties if p["id"] == property_id
-    )
-
-    units = (
-        supabase.table("units")
-        .select("id, unit_name")
-        .eq("property_id", property_id)
-        .execute()
-        .data
-    )
-    unit_ids = [u["id"] for u in units]
-    unit_name_by_id = {u["id"]: u["unit_name"] for u in units}
-    if not unit_ids:
-        return f"{property_name} has no units/tasks yet."
-
-    items = (
-        supabase.table("line_items")
-        .select("id, unit_id, task_name, cost_group")
-        .in_("unit_id", unit_ids)
-        .execute()
-        .data
-    )
-    candidates = [
-        {
-            "id": item["id"],
-            "unit_name": unit_name_by_id.get(item["unit_id"], "Unknown unit"),
-            "task_name": item["task_name"],
-            "cost_group": item.get("cost_group"),
-        }
-        for item in items
+    task_changes, seen = [], set()
+    already_current = 0
+    for u in result.get("task_updates", []):
+        task = task_by_ref.get(u.get("ref"))
+        if not task or task["line_item_id"] in seen:
+            continue
+        seen.add(task["line_item_id"])
+        status, percent = _target(task, u["status"], u.get("percent"))
+        if status == task["status"] and abs(percent - task["percent"]) < 0.5:
+            already_current += 1
+            continue
+        task_changes.append({**task, "new_status": status, "status": status,
+                             "percent": percent, "old_status": task["status"]})
+    draw_changes = [
+        {k: v for k, v in draw_by_ref[u["ref"]].items()}
+        for u in result.get("draw_updates", []) if u.get("ref") in draw_by_ref
     ]
+    not_acted = list(result.get("unclear", []))
 
-    scope_description = parsed.get("scope_description") or ""
-    try:
-        matched = _match_scope(scope_description, candidates)
-    except Exception:
-        return "I had trouble matching that against the schedule — could you rephrase?"
+    if not task_changes and not draw_changes:
+        base = "I didn't find anything to change, sir"
+        if already_current:
+            base += f" — the {already_current} item(s) you mentioned are already recorded that way"
+        if not_acted:
+            return base + ". I couldn't place:\n" + "\n".join(f"  • {x}" for x in not_acted[:8]) + \
+                "\n\nCould you name the task(s) more closely?"
+        return base + ". To update the schedule, tell me what's done or how far along — for " \
+            "example “the roof is complete at 809”, or reply to the daily summary line by line."
 
-    if not matched:
-        return f"I couldn't find any tasks matching \"{scope_description}\" at {property_name}."
+    # Telegram splits long messages: fold this one into any still-pending proposal.
+    existing = _load_pending(supabase, chat_id)
+    merged = existing is not None
+    changes = existing or {"tasks": [], "draws": []}
+    by_task = {c["line_item_id"]: c for c in changes["tasks"]}
+    for c in task_changes:
+        by_task[c["line_item_id"]] = c
+    by_draw = {d["milestone_id"]: d for d in changes["draws"]}
+    for d in draw_changes:
+        by_draw[d["milestone_id"]] = d
+    changes = {"tasks": list(by_task.values()), "draws": list(by_draw.values())}
 
-    lines = "\n".join(f"  • {m['unit_name']}: {m['task_name']}" for m in matched)
-    percent_label = f" at {percent:.0f}%" if status == "In Progress" else ""
-    summary = (
-        f"{len(matched)} task(s) matching \"{scope_description}\" at "
-        f"{property_name} -> {status}{percent_label}"
-    )
+    supabase.table("pending_bulk_updates").upsert({
+        "chat_id": chat_id, "changes": changes, "summary": f"{len(changes['tasks'])} task(s), {len(changes['draws'])} draw(s)",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
 
-    supabase.table("pending_bulk_updates").upsert(
-        {
-            "chat_id": chat_id,
-            "property_id": property_id,
-            "property_name": property_name,
-            "line_item_ids": [m["id"] for m in matched],
-            "new_status": status,
-            "new_percent": percent,
-            "summary": summary,
-        }
-    ).execute()
-
-    return (
-        f"I found {len(matched)} task(s) at {property_name} matching "
-        f'"{scope_description}":\n{lines}\n\n'
-        f"Mark these {status}{percent_label}? Reply \"yes\" to confirm."
-    )
+    reply = _preview(changes, not_acted, merged)
+    if already_current:
+        reply = reply.replace("\n\nReply", f"\n({already_current} you mentioned were already recorded that way.)\n\nReply", 1)
+    return reply
 
 
 def apply_pending_update(supabase: Client, chat_id: str) -> str | None:
-    """Applies the pending proposal for this chat, if any, and returns a
-    confirmation reply. Returns None if there's nothing pending (so the
-    caller can fall through to treating the message as something else).
-    A proposal older than PROPOSAL_TTL is discarded, never applied.
-    """
-    rows = (
-        supabase.table("pending_bulk_updates")
-        .select("*")
-        .eq("chat_id", chat_id)
-        .execute()
-        .data
-    )
+    """Applies the pending proposal, if any. None if there's nothing pending
+    (the caller falls through to treating the message as new). A proposal
+    older than PROPOSAL_TTL is discarded, never applied."""
+    rows = supabase.table("pending_bulk_updates").select("*").eq("chat_id", chat_id).execute().data
     if not rows:
         return None
     pending = rows[0]
-
     created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
     if datetime.now(timezone.utc) - created > PROPOSAL_TTL:
         supabase.table("pending_bulk_updates").delete().eq("chat_id", chat_id).execute()
@@ -335,56 +355,45 @@ def apply_pending_update(supabase: Client, chat_id: str) -> str | None:
             "than risk applying it to a schedule that may have changed. Please send "
             "the update again."
         )
+    changes = pending.get("changes")
+    if not changes:  # an old-format proposal from before this upgrade
+        supabase.table("pending_bulk_updates").delete().eq("chat_id", chat_id).execute()
+        return "That proposal was from before an upgrade, sir — please send the update again."
 
-    line_item_ids = pending["line_item_ids"]
-    new_status = pending["new_status"]
-    new_percent = pending["new_percent"]
-    property_id = pending["property_id"]
-    property_name = pending["property_name"]
+    by_property: dict[str, dict] = {}
+    for c in changes["tasks"]:
+        supabase.table("line_items").update(
+            {"status": c["status"], "percent_complete": c["percent"]}
+        ).eq("id", c["line_item_id"]).execute()
+        entry = by_property.setdefault(c["property_id"], {"name": c["property_name"], "lines": [], "draws": 0})
+        suffix = f" ({c['percent']:.0f}%)" if c["status"] == "In Progress" and c["percent"] else ""
+        entry["lines"].append(f"{c['unit_name']}: {c['task_name']} — now {c['status']}{suffix}")
 
-    items = (
-        supabase.table("line_items")
-        .select("id, unit_id, task_name")
-        .in_("id", line_item_ids)
-        .execute()
-        .data
-    )
-    unit_ids = list({item["unit_id"] for item in items})
-    units = (
-        supabase.table("units")
-        .select("id, unit_name")
-        .in_("id", unit_ids)
-        .execute()
-        .data
-    )
-    unit_name_by_id = {u["id"]: u["unit_name"] for u in units}
-
-    supabase.table("line_items").update(
-        {"status": new_status, "percent_complete": new_percent}
-    ).in_("id", line_item_ids).execute()
-
-    changes = [
-        f"{unit_name_by_id.get(item['unit_id'], 'Unknown unit')}: {item['task_name']} — now {new_status}"
-        for item in items
-    ]
+    draws_paid = 0
+    for d in changes["draws"]:
+        current = supabase.table("draw_milestones").select("status").eq("id", d["milestone_id"]).execute().data
+        if current and current[0]["status"] != "Released":
+            release_draw_milestone(supabase, d["milestone_id"])
+            log_activity(supabase, d["property_id"], "draw",
+                         f"{d['name']} marked paid (via Jeeves) — ${d['amount']:,.2f}")
+            by_property.setdefault(d["property_id"], {"name": d["property_name"], "lines": [], "draws": 0})["draws"] += 1
+            draws_paid += 1
 
     supabase.table("pending_bulk_updates").delete().eq("chat_id", chat_id).execute()
 
-    log_activity(supabase, property_id, "schedule", pending["summary"])
+    for property_id, entry in by_property.items():
+        if not entry["lines"]:
+            continue
+        log_activity(supabase, property_id, "schedule", f"{len(entry['lines'])} task update(s) via Jeeves")
+        row = supabase.table("properties").select("telegram_chat_id").eq("id", property_id).execute().data
+        send_and_pin_batch_schedule_update(
+            property_name=entry["name"], property_id=property_id, changes=entry["lines"],
+            chat_id=row[0].get("telegram_chat_id") if row else None,
+        )
 
-    property_row = (
-        supabase.table("properties")
-        .select("telegram_chat_id")
-        .eq("id", property_id)
-        .execute()
-        .data
-    )
-    group_chat_id = property_row[0].get("telegram_chat_id") if property_row else None
-    send_and_pin_batch_schedule_update(
-        property_name=property_name,
-        property_id=property_id,
-        changes=changes,
-        chat_id=group_chat_id,
-    )
-
-    return f"Done — updated {len(items)} task(s) at {property_name}."
+    bits = []
+    if changes["tasks"]:
+        bits.append(f"updated {len(changes['tasks'])} task(s)")
+    if draws_paid:
+        bits.append(f"marked {draws_paid} draw(s) as paid")
+    return "🎩 Done, sir — " + " and ".join(bits) + "."
