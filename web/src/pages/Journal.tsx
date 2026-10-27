@@ -41,16 +41,29 @@ export default function Journal() {
           <div key={g.ids[0]} className="card">
             <div className="muted small">{fmtDateTime(g.posted_at)} · {g.author_name}</div>
             {g.message_text && <p style={{ margin: "6px 0 0", whiteSpace: "pre-wrap" }}>{g.message_text}</p>}
-            {g.photo_file_ids.length > 0 && (
-              <>
-                {g.photo_file_ids.length > 1 && <div className="muted small" style={{ marginTop: 6 }}>📷 {g.photo_file_ids.length} photos</div>}
-                <div className="photo-grid">
-                  {g.photo_file_ids.map((f) => (
-                    <img key={f} src={`/api/photos/${encodeURIComponent(f)}`} loading="lazy" alt="Job site" onClick={() => setZoom(f)} />
-                  ))}
-                </div>
-              </>
-            )}
+            {(() => {
+              const photos = g.media.filter((m) => m.kind === "photo");
+              const others = g.media.filter((m) => m.kind !== "photo");
+              return (
+                <>
+                  {photos.length > 1 && <div className="muted small" style={{ marginTop: 6 }}>📷 {photos.length} photos</div>}
+                  {photos.length > 0 && (
+                    <div className="photo-grid">
+                      {photos.map((m) => <img key={m.src} src={m.src} loading="lazy" alt="Job site" onClick={() => setZoom(m.src)} />)}
+                    </div>
+                  )}
+                  {others.map((m) =>
+                    m.kind === "voice" || m.kind === "audio" ? (
+                      <audio key={m.src} controls preload="none" src={m.src} style={{ width: "100%", marginTop: 8 }} />
+                    ) : m.kind === "video" || m.kind === "video_note" || m.kind === "animation" ? (
+                      <video key={m.src} controls preload="metadata" src={m.src} style={{ width: "100%", marginTop: 8, borderRadius: 10 }} />
+                    ) : (
+                      <a key={m.src} href={m.src} target="_blank" rel="noreferrer" className="btn small" style={{ marginTop: 8 }}>📎 Open file</a>
+                    ),
+                  )}
+                </>
+              );
+            })()}
             {canEdit && !data.property.archived && (
               <select style={{ marginTop: 10 }} aria-label="Linked task" value={g.linked_line_item_id ?? ""}
                 onChange={(e) => link.mutate({ ids: g.ids, taskId: e.target.value || null })}>
@@ -63,7 +76,7 @@ export default function Journal() {
       </div>
       {zoom && (
         <div className="lightbox" onClick={() => setZoom(null)} role="dialog" aria-label="Photo">
-          <img src={`/api/photos/${encodeURIComponent(zoom)}`} alt="Job site" />
+          <img src={zoom} alt="Job site" />
         </div>
       )}
     </div>

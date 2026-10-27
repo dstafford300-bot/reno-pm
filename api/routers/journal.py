@@ -7,11 +7,17 @@ from supabase import Client
 from api.common import assert_writable, get_property, property_units_and_items
 from api.security import assert_property_access, owner_or_pm
 from db.connection import get_supabase_client
+from services.storage import JOURNAL_MEDIA_BUCKET, signed_urls
 from services.telegram_bot import download_file_bytes
 
 router = APIRouter(prefix="/api", tags=["journal"])
 
 _PHOTO_BURST_SECONDS = 600
+
+
+def _is_photo_only(e: dict) -> bool:
+    has_photo = e.get("photo_file_id") or (e.get("media_kind") == "photo" and e.get("media_path"))
+    return bool(has_photo) and not e.get("message_text")
 
 
 def _group_entries(entries: list[dict]) -> list[dict]:
@@ -24,8 +30,8 @@ def _group_entries(entries: list[dict]) -> list[dict]:
         if groups:
             last = groups[-1][-1]
             if (
-                entry.get("photo_file_id") and not entry.get("message_text")
-                and last.get("photo_file_id") and not last.get("message_text")
+                _is_photo_only(entry)
+                and _is_photo_only(last)
                 and groups[-1][0]["author_name"] == entry["author_name"]
                 and abs(
                     (datetime.fromisoformat(last["posted_at"])
@@ -42,11 +48,24 @@ def _group_entries(entries: list[dict]) -> list[dict]:
             "posted_at": g[0]["posted_at"],
             "author_name": g[0]["author_name"],
             "message_text": g[0].get("message_text"),
-            "photo_file_ids": [e["photo_file_id"] for e in g if e.get("photo_file_id")],
+            "entries": g,
             "linked_line_item_id": g[0].get("linked_line_item_id"),
         }
         for g in groups
     ]
+
+
+def _media_for(entries: list[dict], urls: dict[str, str]) -> list[dict]:
+    """The viewable media of a group's entries: our private stored copy when
+    there is one (survives Telegram dropping the file), else the Telegram
+    file proxied through the app (older entries)."""
+    media = []
+    for e in entries:
+        if e.get("media_path") and e["media_path"] in urls:
+            media.append({"kind": e.get("media_kind") or "photo", "src": urls[e["media_path"]]})
+        elif e.get("photo_file_id"):
+            media.append({"kind": "photo", "src": f"/api/photos/{e['photo_file_id']}"})
+    return media
 
 
 @router.get("/properties/{property_id}/journal")
@@ -57,14 +76,22 @@ def get_journal(
 ):
     assert_property_access(db, user, property_id)
     prop = get_property(db, property_id, "id, property_name, archived, telegram_chat_id")
-    entries = (
-        db.table("journal_entries")
-        .select("id, author_name, message_text, photo_file_id, posted_at, linked_line_item_id")
-        .eq("property_id", property_id)
-        .order("posted_at", desc=True)
-        .limit(600)
-        .execute()
-        .data
+    base = "id, author_name, message_text, photo_file_id, posted_at, linked_line_item_id"
+    try:
+        entries = (
+            db.table("journal_entries").select(base + ", media_kind, media_path")
+            .eq("property_id", property_id).order("posted_at", desc=True).limit(600)
+            .execute().data
+        )
+    except Exception:  # migration_telegram_inbox.sql not run yet
+        entries = (
+            db.table("journal_entries").select(base)
+            .eq("property_id", property_id).order("posted_at", desc=True).limit(600)
+            .execute().data
+        )
+    urls = signed_urls(
+        db, JOURNAL_MEDIA_BUCKET,
+        [e["media_path"] for e in entries if e.get("media_path")], 3600,
     )
     _, items = property_units_and_items(db, property_id, "id, task_name")
     return {
@@ -73,7 +100,10 @@ def get_journal(
             "archived": bool(prop.get("archived")),
             "telegram_linked": bool(prop.get("telegram_chat_id")),
         },
-        "groups": _group_entries(entries),
+        "groups": [
+            {**{k: v for k, v in g.items() if k != "entries"}, "media": _media_for(g["entries"], urls)}
+            for g in _group_entries(entries)
+        ],
         "tasks": [{"id": i["id"], "task_name": i["task_name"]} for i in items],
     }
 

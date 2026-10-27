@@ -1,6 +1,7 @@
 import streamlit as st
 
 from db.connection import get_supabase_client
+from services.storage import resolve_photo_ref
 from utils.mobile import inject_mobile_button_css, inject_mobile_card_css
 
 
@@ -96,4 +97,4 @@ def render():
                     st.write(f"• {li.get('description')} — ${li.get('cost', 0):,.2f}")
             with col_photo:
                 if log.get("photo_url"):
-                    st.image(log["photo_url"])
+                    st.image(resolve_photo_ref(supabase, log["photo_url"]))

@@ -1,0 +1,43 @@
+name: Nightly Backup
+
+# Encrypted off-server copy of the Supabase database + storage files to
+# Backblaze B2 (see scripts/backup.py). Does nothing until the B2_* and
+# BACKUP_ENCRYPTION_KEY secrets are set. This repo is public, so the script
+# prints counts only — never data.
+
+on:
+  schedule:
+    - cron: "30 8 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    env:
+      B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET }}
+      B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+      BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+    steps:
+      - name: Check configured
+        id: check
+        run: |
+          if [ -z "$B2_KEY_ID" ] || [ -z "$BACKUP_ENCRYPTION_KEY" ]; then
+            echo "Backup secrets not set yet — skipping."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.configured == 'true'
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.configured == 'true'
+        with:
+          python-version: "3.12"
+      - if: steps.check.outputs.configured == 'true'
+        run: pip install supabase python-dotenv cryptography boto3
+      - if: steps.check.outputs.configured == 'true'
+        run: python scripts/backup.py

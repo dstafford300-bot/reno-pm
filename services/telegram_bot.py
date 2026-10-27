@@ -129,17 +129,43 @@ def format_portal_link_message(property_id: str) -> str:
     )
 
 
-def _send_and_pin_text(text: str, chat_id: str | None) -> bool:
-    """Sends `text`, unpins whatever was previously pinned in the chat,
-    and pins the new message — so only the latest Jeeves link stays
-    pinned instead of accumulating one per publish. Returns True only if
-    the send AND the pin succeeded (a failed unpin is not fatal — it just
-    means an old link stays pinned alongside the new one); never raises,
-    so callers can fire this from a background thread safely.
+def _pin_state_key(chat_id: str) -> str:
+    return f"jeeves_pin_{chat_id}"
 
-    Note: unpinAllChatMessages clears every pin in the chat, not just
-    ones Jeeves made — fine for a group whose only pinned content is this
-    portal link, but would also drop anything a human pinned manually.
+
+def _get_last_pin(chat_id: str) -> int | None:
+    """The message id of the pin Jeeves itself last made in this chat."""
+    try:
+        from db.connection import get_supabase_client
+
+        rows = (
+            get_supabase_client().table("bot_state").select("value")
+            .eq("key", _pin_state_key(chat_id)).execute().data
+        )
+        return int(rows[0]["value"]) if rows else None
+    except Exception:
+        return None
+
+
+def _set_last_pin(chat_id: str, message_id: int) -> None:
+    try:
+        from db.connection import get_supabase_client
+
+        get_supabase_client().table("bot_state").upsert(
+            {"key": _pin_state_key(chat_id), "value": str(message_id)}
+        ).execute()
+    except Exception:
+        pass
+
+
+def _send_and_pin_text(text: str, chat_id: str | None) -> bool:
+    """Sends `text`, unpins Jeeves' OWN previous pin in the chat, and pins the
+    new message — so only the latest Jeeves link stays pinned instead of one
+    accumulating per publish. Never touches anything a person pinned: it
+    remembers the id of the message it pinned last time (bot_state) and
+    unpins just that one, rather than unpinAllChatMessages. Returns True only
+    if the send AND the pin succeeded; never raises, so callers can fire this
+    from a background thread safely.
     """
     token = _get_bot_token()
     target_chat_id = chat_id or _get_default_chat_id()
@@ -147,12 +173,6 @@ def _send_and_pin_text(text: str, chat_id: str | None) -> bool:
         return False
 
     try:
-        requests.post(
-            f"{TELEGRAM_API_BASE}/bot{token}/unpinAllChatMessages",
-            json={"chat_id": target_chat_id},
-            timeout=10,
-        )
-
         send_response = requests.post(
             f"{TELEGRAM_API_BASE}/bot{token}/sendMessage",
             json={"chat_id": target_chat_id, "text": text, "parse_mode": "HTML"},
@@ -173,7 +193,19 @@ def _send_and_pin_text(text: str, chat_id: str | None) -> bool:
             },
             timeout=10,
         )
-        return pin_response.ok
+        if not pin_response.ok:
+            return False
+
+        previous = _get_last_pin(str(target_chat_id))
+        if previous and previous != message_id:
+            # A failed unpin is harmless: the old link just stays pinned too.
+            requests.post(
+                f"{TELEGRAM_API_BASE}/bot{token}/unpinChatMessage",
+                json={"chat_id": target_chat_id, "message_id": previous},
+                timeout=10,
+            )
+        _set_last_pin(str(target_chat_id), message_id)
+        return True
     except requests.RequestException:
         return False
 

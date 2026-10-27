@@ -129,7 +129,7 @@ export interface JournalGroup {
   posted_at: string;
   author_name: string;
   message_text: string | null;
-  photo_file_ids: string[];
+  media: { kind: string; src: string }[];
   linked_line_item_id: string | null;
 }
 

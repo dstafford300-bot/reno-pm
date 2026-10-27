@@ -5,7 +5,12 @@ import streamlit as st
 
 from db.connection import get_supabase_client
 from services.db_writer import link_journal_entry_to_line_item
-from services.telegram_bot import get_file_url
+from services.telegram_bot import download_file_bytes
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _photo_bytes(file_id: str):
+    return download_file_bytes(file_id)
 
 
 def render():
@@ -140,14 +145,16 @@ def render():
             st.caption(f"{posted.strftime('%b %-d, %Y — %I:%M %p')} · {entry['author_name']}")
             if entry.get("message_text"):
                 st.markdown(html.escape(entry["message_text"]))
+            # Downloaded server-side and shown as image data. Telegram's own
+            # file URL embeds the bot token, so it must never reach the browser.
             photo_urls = [
-                url
-                for url in (
-                    get_file_url(g["photo_file_id"])
+                data
+                for data in (
+                    _photo_bytes(g["photo_file_id"])
                     for g in group
                     if g.get("photo_file_id")
                 )
-                if url
+                if data
             ]
             if len(group) > 1:
                 st.caption(f"📷 {len(group)} photos")

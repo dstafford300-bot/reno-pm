@@ -23,6 +23,7 @@ from services.db_writer import (
     set_budget_includes_materials,
 )
 from services.email_receipts import sync_email_receipts
+from services.storage import resolve_photo_ref
 from services.receipt_parser import (
     match_property_from_text,
     match_unit_from_reference,
@@ -387,7 +388,7 @@ def property_material_logs(
             "purchase_date": (l.get("purchase_date") or "")[:10],
             "source": l.get("source"),
             "unit_name": unit_name.get(unit_id),
-            "photo_url": l.get("photo_url"),
+            "photo_url": resolve_photo_ref(db, l.get("photo_url")),
             "items": l.get("line_items_json") or [],
             "details": (l.get("receipt_details") or "")[:400],
         })
