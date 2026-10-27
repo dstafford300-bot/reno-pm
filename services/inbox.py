@@ -126,3 +126,24 @@ def due_for_retry(supabase: Client, limit: int = 20) -> list[dict]:
         )
     except Exception:
         return []
+
+
+RETAIN_HANDLED = timedelta(days=7)
+
+
+def prune(supabase: Client) -> int:
+    """Deletes handled inbox rows older than a week. The inbox exists to make
+    sure no message is lost mid-processing and to retry failures — not as a
+    permanent archive. Anything worth keeping is already in the journal (text
+    facts, plus photos/voice/video copied into private storage). Rows that
+    failed or died are kept until someone looks at them."""
+    cutoff = (datetime.now(timezone.utc) - RETAIN_HANDLED).isoformat()
+    try:
+        gone = (
+            supabase.table("telegram_inbox").delete()
+            .eq("status", "handled").lt("received_at", cutoff).execute().data
+        )
+        return len(gone)
+    except Exception as e:
+        print(f"WARNING: couldn't prune the inbox: {e}")
+        return 0

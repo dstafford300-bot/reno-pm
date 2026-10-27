@@ -3,7 +3,8 @@
   python scripts/backup.py            -> uploads to Backblaze B2 (needs B2_* env)
   python scripts/backup.py --local D  -> writes to folder D (for testing)
 
-What it saves
+What it saves (the raw Telegram message log is deliberately NOT backed up —
+the journal and its stored photos/videos are what matter)
   db/<date>.tar.gz.enc   every table as JSON lines, tarred + encrypted
   files/<bucket>/<path>  every file in the Supabase Storage buckets
                          (encrypted; only files not already backed up are sent)
@@ -39,8 +40,7 @@ BUCKETS = ["journal-media", "receipts", "legacy-materials"]
 TABLES = {
     "properties": "id", "units": "id", "line_items": "id", "draw_milestones": "id",
     "draw_milestone_tasks": "id", "journal_entries": "id", "material_logs": "id",
-    "activity_log": "id", "bot_state": "key", "telegram_inbox": "id",
-    "processed_telegram_updates": "update_id", "processed_emails": "message_id",
+    "activity_log": "id", "bot_state": "key", "processed_emails": "message_id",
     "pending_bulk_updates": "chat_id", "app_users": "id", "user_properties": "user_id",
     "change_requests": "id", "pending_schedule_changes": "id",
 }

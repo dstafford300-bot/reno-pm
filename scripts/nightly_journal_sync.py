@@ -29,6 +29,7 @@ import os
 from supabase import create_client
 
 from services.email_receipts import sync_email_receipts
+from services.inbox import prune as prune_inbox
 from services.pm_digest import send_daily_pm_digest
 from services.trade_nudges import check_and_send_trade_nudges
 
@@ -55,6 +56,8 @@ def main():
         f"  Trade nudges: checked {nudge_result['checked']} task(s), "
         f"sent {nudge_result['sent']}"
     )
+
+    print(f"  Inbox: cleared {prune_inbox(client)} handled message(s) older than a week")
 
     digest_sent = send_daily_pm_digest(client)
     print(f"  PM daily digest: {'sent' if digest_sent else 'no PM chat linked, skipped'}")
