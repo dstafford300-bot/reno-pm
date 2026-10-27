@@ -114,9 +114,26 @@ UPDATE_TOOL = {
                     "type": "object",
                     "properties": {
                         "ref": {"type": "string", "description": "A draw reference from the list, e.g. D2."},
+                        "amount_paid": {
+                            "type": ["number", "null"],
+                            "description": "The amount actually paid, if stated and it differs from the scheduled amount (an overage or shortfall). Null otherwise.",
+                        },
                         "evidence": {"type": "string"},
                     },
                     "required": ["ref", "evidence"],
+                },
+            },
+            "schedule_shifts": {
+                "type": "array",
+                "description": "A whole unit's work being delayed/moved: its earliest start date is now the given date and everything after it moves by the same amount.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "unit_ref": {"type": "string", "description": "A unit reference from the list, e.g. U3."},
+                        "new_start": {"type": "string", "description": "YYYY-MM-DD the unit's earliest work now starts."},
+                        "evidence": {"type": "string"},
+                    },
+                    "required": ["unit_ref", "new_start", "evidence"],
                 },
             },
             "unclear": {
@@ -128,7 +145,7 @@ UPDATE_TOOL = {
                 ),
             },
         },
-        "required": ["applicable", "task_updates", "draw_updates", "unclear"],
+        "required": ["applicable", "task_updates", "draw_updates", "schedule_shifts", "unclear"],
     },
 }
 
@@ -146,10 +163,18 @@ implied). "not started / reset" -> Pending.
 - "draw (request) was paid / received / released" -> the matching draw in the DRAWS list. If it's \
 unclear WHICH draw, put it in `unclear` rather than guessing.
 - Never guess. If you can't tell which listed task a phrase means, put it in `unclear`.
-- The same kind of work often exists in several units (flooring, paint, kitchen, bathroom in both \
-Unit 2 and Unit 3). If the message doesn't say which unit and the context doesn't make it \
-obvious, DO NOT pick one — put it in `unclear` as "<what they said> — which unit?".
-- New dates/ETAs, delays, questions and opinions are not updates: list them in `unclear`.
+- A property named WITHOUT a unit means ALL of its units: "Montclair demo done" completes the demo \
+task in every unit at Montclair. Only when a unit IS named is the update limited to that unit.
+- When no property is named at all and the same kind of work exists in several properties/units, \
+DO NOT pick one — put it in `unclear` as "<what they said> — which property/unit?".
+- A unit's work being delayed or pushed ("all unit 2 work pushed to start Oct 17") is a \
+schedule_shift: unit_ref plus new_start (earliest start of that unit's work; the rest follows). \
+Resolve dates against TODAY (given below); a date without a year is the next upcoming one.
+- A draw paid for an amount that differs from the scheduled one still goes in draw_updates for the \
+draw it belongs to, with amount_paid set to what was actually paid. Pick the draw from the \
+context in the message (e.g. "against unit 3 labor" -> the Unit 3 draw); if it is truly not \
+determinable, put it in `unclear`.
+- Other new ETAs, questions and opinions are not updates: list them in `unclear`.
 - If a message mentions both properties, handle each by its own tasks. If the property isn't \
 stated, use whichever property the item clearly belongs to.
 
@@ -167,8 +192,9 @@ def _load_context(supabase: Client):
     ]
     task_by_ref: dict[str, dict] = {}
     draw_by_ref: dict[str, dict] = {}
-    lines: list[str] = []
-    t = d = 0
+    unit_by_ref: dict[str, dict] = {}
+    lines: list[str] = [f"TODAY: {datetime.now(timezone.utc).date().isoformat()}"]
+    t = d = u_n = 0
     for prop in props:
         units = supabase.table("units").select("id, unit_name").eq("property_id", prop["id"]).execute().data
         unit_name = {u["id"]: u["unit_name"] for u in units}
@@ -176,10 +202,20 @@ def _load_context(supabase: Client):
         if units:
             items = (
                 supabase.table("line_items")
-                .select("id, unit_id, task_name, cost_group, status, percent_complete")
+                .select("id, unit_id, task_name, cost_group, status, percent_complete, start_date, estimated_end_date")
                 .in_("unit_id", list(unit_name)).execute().data
             )
         lines.append(f"\nPROPERTY: {prop['property_name']}")
+        uref_by_id = {}
+        for uid, uname in unit_name.items():
+            u_n += 1
+            uref_by_id[uid] = f"U{u_n}"
+            starts = [i["start_date"] for i in items if i["unit_id"] == uid and i.get("start_date")]
+            unit_by_ref[f"U{u_n}"] = {
+                "unit_id": uid, "unit_name": uname, "property_id": prop["id"],
+                "property_name": prop["property_name"], "earliest": min(starts) if starts else None,
+            }
+            lines.append(f"  UNIT U{u_n} = {uname} (earliest work starts {min(starts) if starts else 'unscheduled'})")
         for item in items:
             t += 1
             ref = f"T{t}"
@@ -207,7 +243,7 @@ def _load_context(supabase: Client):
                 "amount": float(draw["draw_amount"] or 0),
             }
             lines.append(f"  {ref} | {draw['milestone_name']} | ${float(draw['draw_amount'] or 0):,.0f}")
-    return "\n".join(lines), task_by_ref, draw_by_ref
+    return "\n".join(lines), task_by_ref, draw_by_ref, unit_by_ref
 
 
 def _read_message(text: str, context: str, conversation: str = "") -> dict:
@@ -248,8 +284,17 @@ def _preview(changes: dict, not_acted: list[str], merged: bool) -> str:
         suffix = f" — {c['percent']:.0f}%" if c["status"] == "In Progress" and c["percent"] else ""
         sec.setdefault(bucket, []).append(f"{esc(c['unit_name'])}: {esc(c['task_name'])}{suffix}")
     for dr in changes["draws"]:
-        by_prop.setdefault(dr["property_name"], {}).setdefault("💰 Draws marked as paid", []).append(
-            f"{esc(dr['name'])} — ${dr['amount']:,.0f}")
+        line = f"{esc(dr['name'])} — ${dr['amount']:,.0f}"
+        sched = dr.get("scheduled", dr["amount"])
+        if abs(dr["amount"] - sched) >= 0.5:
+            diff = dr["amount"] - sched
+            line += f" paid (scheduled ${sched:,.0f}; ${abs(diff):,.0f} {'over' if diff > 0 else 'under'} — I shall record the amount actually paid)"
+        by_prop.setdefault(dr["property_name"], {}).setdefault("💰 Draws marked as paid", []).append(line)
+    for sh in changes.get("shifts", []):
+        d = sh["days"]
+        by_prop.setdefault(sh["property_name"], {}).setdefault("📅 Schedule moved", []).append(
+            f"{esc(sh['unit_name'])}: earliest start {sh['earliest']} → {sh['new_start']} "
+            f"({abs(d)} day{'s' if abs(d) != 1 else ''} {'later' if d > 0 else 'earlier'}); all its tasks move together")
 
     parts = ["🎩 " + ("Added to your pending changes, sir. " if merged else "")
              + "Here is what I shall record:"]
@@ -300,7 +345,7 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
     ALWAYS returns an answer — a DM to Jeeves is never silently ignored."""
     existing = _load_pending(supabase, chat_id)
     try:
-        context, task_by_ref, draw_by_ref = _load_context(supabase)
+        context, task_by_ref, draw_by_ref, unit_by_ref = _load_context(supabase)
         result = _read_message(text, context, _conversation_so_far(existing))
     except Exception as e:
         print(f"WARNING: couldn't read update message: {e}")
@@ -319,13 +364,31 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
             continue
         task_changes.append({**task, "new_status": status, "status": status,
                              "percent": percent, "old_status": task["status"]})
-    draw_changes = [
-        {k: v for k, v in draw_by_ref[u["ref"]].items()}
-        for u in result.get("draw_updates", []) if u.get("ref") in draw_by_ref
-    ]
+    draw_changes = []
+    for u in result.get("draw_updates", []):
+        if u.get("ref") not in draw_by_ref:
+            continue
+        draw = dict(draw_by_ref[u["ref"]])
+        paid = u.get("amount_paid")
+        draw["scheduled"] = draw["amount"]
+        if paid is not None and abs(float(paid) - draw["amount"]) >= 0.5:
+            draw["amount"] = float(paid)
+        draw_changes.append(draw)
+    shift_changes = []
+    for u in result.get("schedule_shifts", []):
+        unit = unit_by_ref.get(u.get("unit_ref"))
+        try:
+            new_start = datetime.fromisoformat(u["new_start"]).date()
+            old_start = datetime.fromisoformat(unit["earliest"]).date() if unit and unit["earliest"] else None
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not unit or not old_start or new_start == old_start:
+            continue
+        shift_changes.append({**unit, "new_start": new_start.isoformat(),
+                              "days": (new_start - old_start).days})
     not_acted = list(result.get("unclear", []))
 
-    if not task_changes and not draw_changes and existing is not None:
+    if not task_changes and not draw_changes and not shift_changes and existing is not None:
         existing["history"] = (existing.get("history") or []) + [text]
         existing["unclear"] = not_acted
         supabase.table("pending_bulk_updates").update({"changes": existing}).eq("chat_id", chat_id).execute()
@@ -335,7 +398,7 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
                 "\n\nCould you say which?"
         return note + "\n\n" + _preview(existing, [], False)
 
-    if not task_changes and not draw_changes:
+    if not task_changes and not draw_changes and not shift_changes:
         base = "I didn't find anything to change, sir"
         if already_current:
             base += f" — the {already_current} item(s) you mentioned are already recorded that way"
@@ -347,21 +410,24 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
 
     # Telegram splits long messages: fold this one into any still-pending proposal.
     merged = existing is not None
-    changes = existing or {"tasks": [], "draws": []}
+    changes = existing or {"tasks": [], "draws": [], "shifts": []}
     by_task = {c["line_item_id"]: c for c in changes["tasks"]}
     for c in task_changes:
         by_task[c["line_item_id"]] = c
     by_draw = {d["milestone_id"]: d for d in changes["draws"]}
     for d in draw_changes:
         by_draw[d["milestone_id"]] = d
+    by_shift = {sh["unit_id"]: sh for sh in (existing or {}).get("shifts", [])}
+    for sh in shift_changes:
+        by_shift[sh["unit_id"]] = sh
     changes = {
-        "tasks": list(by_task.values()), "draws": list(by_draw.values()),
+        "tasks": list(by_task.values()), "draws": list(by_draw.values()), "shifts": list(by_shift.values()),
         "history": ((existing or {}).get("history") or []) + [text],
         "unclear": not_acted,
     }
 
     supabase.table("pending_bulk_updates").upsert({
-        "chat_id": chat_id, "changes": changes, "summary": f"{len(changes['tasks'])} task(s), {len(changes['draws'])} draw(s)",
+        "chat_id": chat_id, "changes": changes, "summary": f"{len(changes['tasks'])} task(s), {len(changes['draws'])} draw(s), {len(changes['shifts'])} shift(s)",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }).execute()
 
@@ -401,13 +467,34 @@ def apply_pending_update(supabase: Client, chat_id: str) -> str | None:
         suffix = f" ({c['percent']:.0f}%)" if c["status"] == "In Progress" and c["percent"] else ""
         entry["lines"].append(f"{c['unit_name']}: {c['task_name']} — now {c['status']}{suffix}")
 
+    shifted = 0
+    for sh in changes.get("shifts", []):
+        rows = supabase.table("line_items").select("id, start_date, estimated_end_date").eq("unit_id", sh["unit_id"]).execute().data
+        delta = timedelta(days=sh["days"])
+        for r in rows:
+            upd = {}
+            for col in ("start_date", "estimated_end_date"):
+                if r.get(col):
+                    upd[col] = (datetime.fromisoformat(r[col]).date() + delta).isoformat()
+            if upd:
+                supabase.table("line_items").update(upd).eq("id", r["id"]).execute()
+        entry = by_property.setdefault(sh["property_id"], {"name": sh["property_name"], "lines": [], "draws": 0})
+        entry["lines"].append(f"{sh['unit_name']}: whole schedule moved {abs(sh['days'])} day(s) "
+                              f"{'later' if sh['days'] > 0 else 'earlier'} — work now begins {sh['new_start']}")
+        shifted += 1
+
     draws_paid = 0
     for d in changes["draws"]:
         current = supabase.table("draw_milestones").select("status").eq("id", d["milestone_id"]).execute().data
         if current and current[0]["status"] != "Released":
+            sched = d.get("scheduled", d["amount"])
+            if abs(d["amount"] - sched) >= 0.5:
+                # Record what was really paid so the budget shows the overage.
+                supabase.table("draw_milestones").update({"draw_amount": d["amount"]}).eq("id", d["milestone_id"]).execute()
             release_draw_milestone(supabase, d["milestone_id"])
+            over = f" (scheduled ${sched:,.2f}, ${d['amount'] - sched:+,.2f})" if abs(d["amount"] - sched) >= 0.5 else ""
             log_activity(supabase, d["property_id"], "draw",
-                         f"{d['name']} marked paid (via Jeeves) — ${d['amount']:,.2f}")
+                         f"{d['name']} marked paid (via Jeeves) — ${d['amount']:,.2f}{over}")
             by_property.setdefault(d["property_id"], {"name": d["property_name"], "lines": [], "draws": 0})["draws"] += 1
             draws_paid += 1
 
@@ -426,6 +513,8 @@ def apply_pending_update(supabase: Client, chat_id: str) -> str | None:
     bits = []
     if changes["tasks"]:
         bits.append(f"updated {len(changes['tasks'])} task(s)")
+    if shifted:
+        bits.append(f"moved {shifted} unit schedule(s)")
     if draws_paid:
         bits.append(f"marked {draws_paid} draw(s) as paid")
     return "🎩 Done, sir — " + " and ".join(bits) + "."
