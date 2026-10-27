@@ -30,7 +30,9 @@ from supabase import Client, create_client
 from services import inbox
 from services.bulk_status_update import (
     apply_pending_update,
+    cancel_pending_update,
     is_confirmation,
+    is_cancellation,
     propose_bulk_update,
 )
 from services.db_writer import set_property_telegram_chat_id
@@ -170,11 +172,15 @@ def _dispatch_jeeves(supabase: Client, update: dict) -> None:
                 return
             if kind == "text" and text:
                 # Preview-then-confirm: nothing is written until an explicit yes.
-                reply = apply_pending_update(supabase, chat_id) if is_confirmation(text) else None
+                reply = None
+                if is_confirmation(text):
+                    reply = apply_pending_update(supabase, chat_id)
+                elif is_cancellation(text):
+                    reply = cancel_pending_update(supabase, chat_id)
                 if reply is None:
+                    # Always answers: a DM to Jeeves is never ignored silently.
                     reply = propose_bulk_update(supabase, chat_id, text)
-                if reply is not None:
-                    send_telegram_message(chat_id, reply)
+                send_telegram_message(chat_id, reply)
             return
 
     # Everything below only applies to a group already linked to a property.

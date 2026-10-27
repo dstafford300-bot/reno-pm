@@ -21,7 +21,18 @@ from services.db_writer import log_activity
 from services.receipt_parser import match_property_from_text
 from services.telegram_bot import send_and_pin_batch_schedule_update
 
-CONFIRM_WORDS = {"yes", "y", "confirm", "confirmed", "do it", "go ahead", "yep", "yup"}
+import re
+from datetime import datetime, timedelta, timezone
+
+_YES_FIRST = {"yes", "y", "yep", "yup", "yeah", "yea", "ok", "okay", "sure", "confirm",
+              "confirmed", "approve", "approved", "correct", "affirmative"}
+_YES_PHRASES = {"do it", "go ahead", "please do", "sounds good", "that's right", "thats right"}
+_NO_FIRST = {"no", "nope", "cancel", "stop", "negative", "wrong", "abort"}
+_NO_PHRASES = {"never mind", "nevermind", "don't", "dont", "do not"}
+
+# A proposal that sits unanswered must not be applied by a stray "yes" days
+# later, against a schedule that has since moved on.
+PROPOSAL_TTL = timedelta(hours=12)
 
 
 def _anthropic_client() -> Anthropic:
@@ -32,8 +43,37 @@ def _model() -> str:
     return os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5"
 
 
+def _words(text: str) -> list[str]:
+    return re.sub(r"[^\w\s']", " ", (text or "").lower()).split()
+
+
+def _short_reply(text: str, first_words: set[str], phrases: set[str]) -> bool:
+    """A short message that opens with one of the words (or is one of the
+    phrases): "Yes.", "yes please", "Yep!", "ok". Capped at 4 words so a real
+    instruction that merely starts with "yes" ("yes, and the gutters are
+    done too") is not mistaken for an answer."""
+    words = _words(text)
+    if not words or len(words) > 4:
+        return False
+    return words[0] in first_words or " ".join(words) in phrases
+
+
 def is_confirmation(text: str) -> bool:
-    return (text or "").strip().lower() in CONFIRM_WORDS
+    t = (text or "").strip()
+    return _short_reply(t, _YES_FIRST, _YES_PHRASES) or t in ("👍", "✅")
+
+
+def is_cancellation(text: str) -> bool:
+    return _short_reply(text, _NO_FIRST, _NO_PHRASES) or (text or "").strip() == "👎"
+
+
+def cancel_pending_update(supabase: Client, chat_id: str) -> str | None:
+    """Drops the pending proposal. None if there wasn't one."""
+    rows = supabase.table("pending_bulk_updates").select("chat_id").eq("chat_id", chat_id).execute().data
+    if not rows:
+        return None
+    supabase.table("pending_bulk_updates").delete().eq("chat_id", chat_id).execute()
+    return "Understood — nothing was changed."
 
 
 PARSE_REQUEST_TOOL = {
@@ -173,14 +213,22 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str | None
     ordinary DM chatter). Never raises."""
     try:
         parsed = _parse_request(text)
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"WARNING: couldn't parse bulk-update request: {e}")
+        return "I had trouble reading that just now, sir — could you try again in a moment?"
     if not parsed.get("applicable"):
-        return None
+        return (
+            "I didn't take that as a schedule update, sir. To update tasks, say what's "
+            "done and where — for example “the roof is complete at 809” or “framing "
+            "in unit 2 is 50% done at 323”."
+        )
 
     status = parsed.get("status")
     if not status:
-        return None
+        return (
+            "I understood which work you mean, but not whether it's finished, under "
+            "way (and how far), or not started. Could you say which?"
+        )
     percent = parsed.get("percent")
     if percent is None:
         percent = {"Completed": 100, "Pending": 0}.get(status, 0)
@@ -265,8 +313,8 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str | None
 def apply_pending_update(supabase: Client, chat_id: str) -> str | None:
     """Applies the pending proposal for this chat, if any, and returns a
     confirmation reply. Returns None if there's nothing pending (so the
-    caller can fall through to treating the message as something else —
-    a stray "yes" with no proposal shouldn't produce a confusing reply).
+    caller can fall through to treating the message as something else).
+    A proposal older than PROPOSAL_TTL is discarded, never applied.
     """
     rows = (
         supabase.table("pending_bulk_updates")
@@ -278,6 +326,15 @@ def apply_pending_update(supabase: Client, chat_id: str) -> str | None:
     if not rows:
         return None
     pending = rows[0]
+
+    created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) - created > PROPOSAL_TTL:
+        supabase.table("pending_bulk_updates").delete().eq("chat_id", chat_id).execute()
+        return (
+            "That proposal is more than 12 hours old, sir, so I've discarded it rather "
+            "than risk applying it to a schedule that may have changed. Please send "
+            "the update again."
+        )
 
     line_item_ids = pending["line_item_ids"]
     new_status = pending["new_status"]
