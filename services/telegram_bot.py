@@ -275,7 +275,7 @@ def format_daily_digest_message(property_summaries: list[dict]) -> str:
         if carried:
             block.append(f"⏳ {carried} item(s) still open from before — nothing new on them")
         if activity:
-            block.append("📋 Yesterday:")
+            block.append("📋 Since the last summary:")
             block.extend(capped(activity, 3, "updates"))
         sections.append("\n".join(block))
 
