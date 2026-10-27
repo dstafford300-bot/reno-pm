@@ -87,13 +87,41 @@ def record(supabase: Client, bot: str, update: dict) -> dict | None:
         return {"id": None, "attempts": 0, "payload": update, "bot": bot}
 
 
+STALE_PROCESSING = timedelta(minutes=10)
+
+
+def claim(supabase: Client, row: dict) -> bool:
+    """Takes the row for processing, atomically: a conditional update that only
+    succeeds for the first caller. A slow handler and the retry loop can no
+    longer both run the same message — the loser gets False and skips it.
+    Bumps `attempts` on the row dict so mark_* see the current count."""
+    if row.get("id") is None:
+        return True
+    attempts = row.get("attempts") or 0
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        q = (
+            supabase.table("telegram_inbox")
+            .update({"status": "processing", "attempts": attempts + 1, "claimed_at": now})
+            .eq("id", row["id"]).eq("attempts", attempts)
+            .in_("status", ["received", "failed", "processing"])
+        )
+        won = bool(q.execute().data)
+    except Exception as e:
+        print(f"WARNING: couldn't claim inbox row {row['id']}: {redact(str(e))}")
+        return True  # never drop a message just because locking is unavailable
+    if won:
+        row["attempts"] = attempts + 1
+    return won
+
+
 def mark_handled(supabase: Client, row: dict) -> None:
     if row.get("id") is None:
         return
     try:
         supabase.table("telegram_inbox").update(
             {
-                "status": "handled", "attempts": (row.get("attempts") or 0) + 1,
+                "status": "handled", "attempts": row.get("attempts") or 1,
                 "handled_at": datetime.now(timezone.utc).isoformat(), "last_error": None,
             }
         ).eq("id", row["id"]).execute()
@@ -103,7 +131,7 @@ def mark_handled(supabase: Client, row: dict) -> None:
 
 def mark_failed(supabase: Client, row: dict, error: Exception) -> str:
     """Returns the new status: "failed" (will retry) or "dead" (gave up)."""
-    attempts = (row.get("attempts") or 0) + 1
+    attempts = row.get("attempts") or 1
     status = "dead" if attempts >= MAX_ATTEMPTS else "failed"
     if row.get("id") is not None:
         try:
@@ -116,14 +144,25 @@ def mark_failed(supabase: Client, row: dict, error: Exception) -> str:
 
 
 def due_for_retry(supabase: Client, limit: int = 20) -> list[dict]:
-    cutoff = (datetime.now(timezone.utc) - RETRY_AFTER).isoformat()
+    now = datetime.now(timezone.utc)
+    cutoff = (now - RETRY_AFTER).isoformat()
+    stale = (now - STALE_PROCESSING).isoformat()
     try:
-        return (
+        waiting = (
             supabase.table("telegram_inbox").select("*")
             .in_("status", ["received", "failed"])
             .lt("attempts", MAX_ATTEMPTS).lt("received_at", cutoff)
             .order("id").limit(limit).execute().data
         )
+        # A handler that died mid-way leaves its row "processing"; pick it up
+        # again only once the claim is clearly abandoned.
+        abandoned = (
+            supabase.table("telegram_inbox").select("*")
+            .eq("status", "processing")
+            .lt("attempts", MAX_ATTEMPTS).lt("claimed_at", stale)
+            .order("id").limit(limit).execute().data
+        )
+        return waiting + abandoned
     except Exception:
         return []
 

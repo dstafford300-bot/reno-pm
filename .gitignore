@@ -5,6 +5,12 @@ __pycache__/
 
 # Environment / secrets
 .env
+*.env
+app.env
+.env.*
+!.env.example
+*.pem
+*.key
 .streamlit/secrets.toml
 
 # OS

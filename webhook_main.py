@@ -202,7 +202,8 @@ def _dispatch_jeeves(supabase: Client, update: dict) -> None:
     if not shaped:
         return
 
-    if kind == "photo" and is_receipt_message(shaped[0]):
+    # Logging an expense changes the books: only approved people may do it.
+    if kind == "photo" and allowed and is_receipt_message(shaped[0]):
         process_receipt_message(supabase, property_id, shaped[0])
         return
 
@@ -277,6 +278,8 @@ def _dispatch_matty(supabase: Client, update: dict) -> None:
 def _process(bot: str, row: dict) -> None:
     supabase = _get_supabase()
     dispatch = _dispatch_jeeves if bot == "jeeves" else _dispatch_matty
+    if not inbox.claim(supabase, row):
+        return  # another worker (or the retry loop) already has this message
     try:
         dispatch(supabase, row["payload"])
     except Exception as e:

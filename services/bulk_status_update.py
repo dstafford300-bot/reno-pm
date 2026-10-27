@@ -181,7 +181,25 @@ stated, use whichever property the item clearly belongs to.
 Call record_updates with the result."""
 
 
-def _load_context(supabase: Client):
+_GENERIC_NAME_WORDS = {
+    "ave", "avenue", "st", "street", "rd", "road", "dr", "drive", "ln", "lane", "ct", "court",
+    "cir", "circle", "blvd", "way", "pl", "place", "north", "south", "east", "west", "the",
+}
+
+
+def _name_tokens(property_name: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9]+", property_name.lower())
+        if w not in _GENERIC_NAME_WORDS and len(w) >= 3
+    }
+
+
+def _mentioned_property_ids(props: list[dict], text: str) -> set[str]:
+    words = set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+    return {p["id"] for p in props if _name_tokens(p["property_name"]) & words}
+
+
+def _load_context(supabase: Client, text: str = "", keep_property_ids: set[str] | None = None):
     """(prompt_text, task_by_ref, draw_by_ref) covering every unarchived
     property: its tasks with current status, and its unpaid draws. Numbered
     refs (T1, D1…) let Claude answer by reference instead of retyping long
@@ -190,6 +208,12 @@ def _load_context(supabase: Client):
         p for p in supabase.table("properties").select("id, property_name, archived").order("property_name").execute().data
         if not p.get("archived")
     ]
+    # Send only the property (or properties) the message is about; the whole
+    # portfolio only when it names none. Properties already in a pending
+    # proposal stay in, so follow-ups keep their context.
+    wanted = _mentioned_property_ids(props, text) | (keep_property_ids or set())
+    if wanted:
+        props = [p for p in props if p["id"] in wanted]
     task_by_ref: dict[str, dict] = {}
     draw_by_ref: dict[str, dict] = {}
     unit_by_ref: dict[str, dict] = {}
@@ -250,7 +274,7 @@ def _read_message(text: str, context: str, conversation: str = "") -> dict:
     client = _anthropic_client()
     message = client.messages.create(
         model=_model(),
-        max_tokens=4096,
+        max_tokens=3000,
         system=UPDATE_SYSTEM_PROMPT,
         tools=[UPDATE_TOOL],
         tool_choice={"type": "tool", "name": "record_updates"},
@@ -345,7 +369,9 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
     ALWAYS returns an answer — a DM to Jeeves is never silently ignored."""
     existing = _load_pending(supabase, chat_id)
     try:
-        context, task_by_ref, draw_by_ref, unit_by_ref = _load_context(supabase)
+        keep = {c["property_id"] for k in ("tasks", "draws", "shifts") for c in (existing or {}).get(k, [])}
+        context, task_by_ref, draw_by_ref, unit_by_ref = _load_context(
+            supabase, " ".join([text] + list((existing or {}).get("history") or [])[-2:]), keep)
         result = _read_message(text, context, _conversation_so_far(existing))
     except Exception as e:
         print(f"WARNING: couldn't read update message: {e}")
@@ -384,8 +410,15 @@ def propose_bulk_update(supabase: Client, chat_id: str, text: str) -> str:
             continue
         if not unit or not old_start or new_start == old_start:
             continue
-        shift_changes.append({**unit, "new_start": new_start.isoformat(),
-                              "days": (new_start - old_start).days})
+        days = (new_start - old_start).days
+        rows = supabase.table("line_items").select("id, start_date, estimated_end_date").eq("unit_id", unit["unit_id"]).execute().data
+        plan = {}
+        for r in rows:
+            plan[r["id"]] = {
+                col: [r[col], (datetime.fromisoformat(r[col]).date() + timedelta(days=days)).isoformat()]
+                for col in ("start_date", "estimated_end_date") if r.get(col)
+            }
+        shift_changes.append({**unit, "new_start": new_start.isoformat(), "days": days, "plan": plan})
     not_acted = list(result.get("unclear", []))
 
     if not task_changes and not draw_changes and not shift_changes and existing is not None:
@@ -469,15 +502,22 @@ def apply_pending_update(supabase: Client, chat_id: str) -> str | None:
 
     shifted = 0
     for sh in changes.get("shifts", []):
-        rows = supabase.table("line_items").select("id, start_date, estimated_end_date").eq("unit_id", sh["unit_id"]).execute().data
+        # Each task has an absolute [old, new] date pair fixed when proposed, so
+        # re-running after a crash sets the same values instead of shifting twice.
         delta = timedelta(days=sh["days"])
-        for r in rows:
+        for item_id, cols in (sh.get("plan") or {}).items():
+            current = supabase.table("line_items").select("start_date, estimated_end_date").eq("id", item_id).execute().data
+            if not current:
+                continue
             upd = {}
-            for col in ("start_date", "estimated_end_date"):
-                if r.get(col):
-                    upd[col] = (datetime.fromisoformat(r[col]).date() + delta).isoformat()
+            for col, (old, new) in cols.items():
+                now_val = current[0].get(col)
+                if now_val == new:
+                    continue  # already moved
+                upd[col] = new if now_val == old else (
+                    (datetime.fromisoformat(now_val).date() + delta).isoformat() if now_val else new)
             if upd:
-                supabase.table("line_items").update(upd).eq("id", r["id"]).execute()
+                supabase.table("line_items").update(upd).eq("id", item_id).execute()
         entry = by_property.setdefault(sh["property_id"], {"name": sh["property_name"], "lines": [], "draws": 0})
         entry["lines"].append(f"{sh['unit_name']}: whole schedule moved {abs(sh['days'])} day(s) "
                               f"{'later' if sh['days'] > 0 else 'earlier'} — work now begins {sh['new_start']}")
